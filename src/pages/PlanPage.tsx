@@ -1,0 +1,1525 @@
+import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
+import { useSmartPosition } from '@/hooks/useSmartPosition'
+import { createPortal } from 'react-dom'
+import { useTranslation } from 'react-i18next'
+import {
+  useReactTable, getCoreRowModel, getExpandedRowModel,
+  ColumnDef, flexRender, Row,
+} from '@tanstack/react-table'
+import { parseISO } from 'date-fns'
+import { useAppStore } from '@/store/useAppStore'
+import { Entry, Phase, EntryStatus, RiskFlag, EntryType, DelayLogEntry, Project, TeamMember } from '@/types'
+import { Button } from '@/components/ui/Button'
+import { Select } from '@/components/ui/Input'
+import StatusBadge from '@/components/StatusBadge'
+import { Modal } from '@/components/ui/Modal'
+import { Textarea, Field } from '@/components/ui/Input'
+import CommentsPanel from '@/components/plan/CommentsPanel'
+import AddEntryModal from '@/components/plan/AddEntryModal'
+import { computeVariance } from '@/utils/dateEngine'
+import { workdaysBetween, parseHolidays } from '@/utils/businessDays'
+import { exportProjectCsv } from '@/utils/exportCsv'
+import { computeAutoStatus } from '@/utils/statusCalc'
+
+// ─── types ────────────────────────────────────────────────────────────────────
+
+interface PlanRow extends Entry {
+  _phaseId: string
+  subRows?: PlanRow[]
+}
+
+interface PendingDate {
+  entryId: string
+  field: 'plannedStart' | 'plannedEnd' | 'plannedDate' | 'actualStart' | 'actualEnd'
+  value: string
+  diffDays: number
+}
+
+// ─── helpers ──────────────────────────────────────────────────────────────────
+
+function fmtDate(iso?: string): string {
+  if (!iso) return ''
+  const [y, m, d] = iso.split('-')
+  return `${d}/${m}/${y}`
+}
+
+const TOGGLEABLE_COLS = [
+  { id: 'responsible', key: 'entry.responsible' },
+  { id: 'deps',      key: 'plan.colDeps' },
+  { id: 'dateStart', key: 'plan.colStart' },
+  { id: 'dateEnd',   key: 'plan.colEnd' },
+  { id: 'blStart',   key: 'entry.baselineStart' },
+  { id: 'blEnd',     key: 'entry.baselineEnd' },
+  { id: 'variance',  key: 'entry.variance' },
+  { id: 'duration',  key: 'plan.colDuration' },
+  { id: 'status',    key: 'entry.status' },
+] as const
+
+/** For done entries show actual, otherwise planned */
+function displayStart(e: Entry): { iso?: string; isActual: boolean; editField: PendingDate['field'] } {
+  if (e.type !== 'task') return { iso: undefined, isActual: false, editField: 'plannedStart' }
+  if (e.status === 'done' && e.actualStart) return { iso: e.actualStart, isActual: true, editField: 'actualStart' }
+  return { iso: e.plannedStart, isActual: false, editField: 'plannedStart' }
+}
+
+function displayEnd(e: Entry): { iso?: string; isActual: boolean; editField: PendingDate['field'] } {
+  if (e.status === 'done' && e.actualEnd) return { iso: e.actualEnd, isActual: true, editField: 'actualEnd' }
+  if (e.type === 'task') return { iso: e.plannedEnd, isActual: false, editField: 'plannedEnd' }
+  return { iso: e.plannedDate, isActual: false, editField: 'plannedDate' }
+}
+
+function computeDisplayVariance(e: Entry, holidays: string[]): number | undefined {
+  const hdates = parseHolidays(holidays)
+  const blEnd = e.type === 'task' ? e.baselineEnd : e.baselineDate
+  if (!blEnd) return undefined
+  const compareDate =
+    e.status === 'done' && e.actualEnd
+      ? e.actualEnd
+      : e.type === 'task'
+      ? e.plannedEnd
+      : e.plannedDate
+  if (!compareDate) return undefined
+  return workdaysBetween(parseISO(blEnd), parseISO(compareDate), hdates)
+}
+
+// ─── InlineEditCell ───────────────────────────────────────────────────────────
+
+function InlineEditCell({ value, onSave, placeholder = '—', className = '' }: {
+  value: string; onSave: (v: string) => void; placeholder?: string; className?: string
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(value)
+
+  if (editing) {
+    return (
+      <input
+        autoFocus
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => { onSave(draft); setEditing(false) }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') { onSave(draft); setEditing(false) }
+          if (e.key === 'Escape') { setDraft(value); setEditing(false) }
+        }}
+        className={`w-full bg-transparent border-b-2 border-blue-400 outline-none text-sm py-0.5 ${className}`}
+      />
+    )
+  }
+
+  return (
+    <span
+      onClick={() => { setDraft(value); setEditing(true) }}
+      title="Clique para editar"
+      className={`cursor-text hover:bg-blue-50 rounded px-0.5 -mx-0.5 ${value ? '' : 'text-gray-300'} ${className}`}
+    >
+      {value || placeholder}
+    </span>
+  )
+}
+
+// ─── DateCell ────────────────────────────────────────────────────────────────
+
+interface DateCellProps {
+  iso?: string
+  isActual?: boolean
+  isOverdue?: boolean
+  isBaseline?: boolean
+  editable?: boolean
+  onCommit: (value: string) => void
+}
+
+function DateCell({ iso, isActual, isOverdue, isBaseline, editable = true, onCommit }: DateCellProps) {
+  const [editing, setEditing] = useState(false)
+  const [hovered, setHovered] = useState(false)
+
+  if (editing) {
+    return (
+      <input
+        type="date"
+        autoFocus
+        defaultValue={iso ?? ''}
+        className="text-[11px] rounded px-1 py-0.5 w-28 focus:outline-none"
+        style={{ border: '1px solid var(--oe-primary)', color: 'var(--text-primary)' }}
+        onBlur={(e) => { if (e.target.value) onCommit(e.target.value); setEditing(false) }}
+        onKeyDown={(e) => { if (e.key === 'Escape') setEditing(false) }}
+      />
+    )
+  }
+
+  if (!iso) {
+    if (!editable) return <span style={{ color: 'var(--text-disabled)', fontSize: 11 }}>—</span>
+    return (
+      <button
+        onClick={() => setEditing(true)}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        className="transition-colors"
+        style={{ color: hovered ? 'var(--oe-primary)' : 'var(--text-disabled)', fontSize: 11 }}
+      >
+        {hovered ? '+' : '—'}
+      </button>
+    )
+  }
+
+  const textColor = isActual
+    ? 'var(--color-success-text)'
+    : isOverdue
+      ? 'var(--color-danger-text)'
+      : isBaseline
+        ? 'var(--text-disabled)'
+        : 'var(--text-primary)'
+
+  return (
+    <button
+      onClick={() => editable && setEditing(true)}
+      className="transition-colors"
+      style={{ color: textColor, fontSize: 11, cursor: editable ? 'pointer' : 'default' }}
+    >
+      {fmtDate(iso)}
+      {isActual && <span className="ml-1" style={{ fontSize: 9, color: 'var(--color-success-text)' }}>(real)</span>}
+    </button>
+  )
+}
+
+// ─── RiskCell ─────────────────────────────────────────────────────────────────
+
+function RiskCell({ flag, linkedRiskId, onChange, onNavigateToRisk }: {
+  flag: RiskFlag
+  linkedRiskId?: string
+  onChange: (f: RiskFlag) => void
+  onNavigateToRisk?: (riskId: string) => void
+}) {
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(false)
+  const { triggerRef, popoverRef, position } = useSmartPosition(open)
+
+  function toggle() {
+    if (linkedRiskId && onNavigateToRisk) {
+      onNavigateToRisk(linkedRiskId)
+      return
+    }
+    setOpen((v) => !v)
+  }
+
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: MouseEvent) => {
+      if (
+        popoverRef.current && !popoverRef.current.contains(e.target as Node) &&
+        triggerRef.current && !triggerRef.current.contains(e.target as Node)
+      ) setOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [open])
+
+  const FlagIcon = () => (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" />
+      <line x1="4" y1="22" x2="4" y2="15" />
+    </svg>
+  )
+
+  const trigger = (
+    <span ref={triggerRef as any}>
+      {flag === 'none' ? (
+        <button onClick={toggle} className="flex items-center" style={{ color: 'var(--text-disabled)' }} title="Risco">
+          <FlagIcon />
+        </button>
+      ) : flag === 'critical' ? (
+        <button onClick={toggle} className="flex items-center" title={t('risk.tooltipCritical')}>
+          <span style={{ display: 'inline-block', width: 7, height: 7, borderRadius: 1, background: 'var(--color-danger-text)' }} />
+        </button>
+      ) : (
+        <button onClick={toggle} className="flex items-center" title={t('risk.tooltipWarning')}>
+          <span style={{ display: 'inline-block', width: 7, height: 7, borderRadius: 1, background: 'var(--color-warning-text)' }} />
+        </button>
+      )}
+    </span>
+  )
+
+  return (
+    <>
+      {trigger}
+      {open && createPortal(
+        <div
+          ref={popoverRef as any}
+          style={{ position: 'fixed', ...position, zIndex: 1000, background: 'var(--surface-card)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)' }}
+          className="py-1 w-40"
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          {(['none', 'warning', 'critical'] as RiskFlag[]).map((f) => (
+            <button
+              key={f}
+              onClick={() => { onChange(f); setOpen(false) }}
+              className="w-full text-left px-3 py-1.5 flex items-center gap-2"
+              style={{ fontSize: 12, color: flag === f ? 'var(--oe-primary)' : 'var(--text-secondary)' }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--surface-subtle)')}
+              onMouseLeave={e => (e.currentTarget.style.background = '')}
+            >
+              {f === 'none' && (
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75} style={{ flexShrink: 0, color: 'var(--text-disabled)' }}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" />
+                  <line x1="4" y1="22" x2="4" y2="15" />
+                </svg>
+              )}
+              {f === 'warning' && <span style={{ display: 'inline-block', width: 7, height: 7, borderRadius: 1, background: 'var(--color-warning-text)', flexShrink: 0 }} />}
+              {f === 'critical' && <span style={{ display: 'inline-block', width: 7, height: 7, borderRadius: 1, background: 'var(--color-danger-text)', flexShrink: 0 }} />}
+              <span className="flex-1">{f === 'none' ? 'OK' : t(f === 'warning' ? 'risk.tooltipWarning' : 'risk.tooltipCritical')}</span>
+              {flag === f && <span style={{ color: 'var(--oe-primary)', fontSize: 10 }}>✓</span>}
+            </button>
+          ))}
+        </div>,
+        document.body,
+      )}
+    </>
+  )
+}
+
+// ─── LinksCell ────────────────────────────────────────────────────────────────
+
+function LinksCell({ entry, projectId }: { entry: Entry; projectId: string }) {
+  const { addEntryLink, removeEntryLink } = useAppStore()
+  const [open, setOpen] = useState(false)
+  const { triggerRef, popoverRef, position } = useSmartPosition(open)
+  const [addLabel, setAddLabel] = useState('')
+  const [addUrl, setAddUrl] = useState('')
+  const count = entry.links.length
+
+  function toggle() {
+    setOpen((v) => !v)
+  }
+
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: MouseEvent) => {
+      if (
+        popoverRef.current && !popoverRef.current.contains(e.target as Node) &&
+        triggerRef.current && !triggerRef.current.contains(e.target as Node)
+      ) setOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [open])
+
+  function handleAdd() {
+    if (!addUrl.trim()) return
+    addEntryLink(projectId, entry.id, { label: addLabel.trim() || addUrl.trim(), url: addUrl.trim() })
+    setAddLabel(''); setAddUrl('')
+  }
+
+  return (
+    <>
+      <button
+        ref={triggerRef as any}
+        onClick={toggle}
+        title="Links"
+        className="relative flex items-center justify-center w-5 h-5 rounded transition-colors"
+        style={{ color: count > 0 ? 'var(--text-secondary)' : 'var(--text-disabled)' }}
+        onMouseEnter={e => (e.currentTarget.style.color = 'var(--text-tertiary)')}
+        onMouseLeave={e => (e.currentTarget.style.color = count > 0 ? 'var(--text-secondary)' : 'var(--text-disabled)')}
+      >
+        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+        </svg>
+        {count > 0 && (
+          <span
+            className="absolute -top-1 -right-1 flex items-center justify-center"
+            style={{ minWidth: 13, height: 13, background: 'var(--oe-primary-light)', color: 'var(--oe-primary)', fontSize: 9, borderRadius: 'var(--radius-pill)', padding: '0 3px', fontWeight: 500 }}
+          >
+            {count}
+          </span>
+        )}
+      </button>
+
+      {open && createPortal(
+        <div
+          ref={popoverRef as any}
+          style={{ position: 'fixed', ...position, zIndex: 1000, background: 'var(--surface-card)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-lg)' }}
+          className="p-3 w-72"
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <p className="mb-2" style={{ fontSize: 10, fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-tertiary)' }}>Links</p>
+          {entry.links.length === 0 && (
+            <p className="mb-2" style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>Nenhum link adicionado.</p>
+          )}
+          {entry.links.map((l) => (
+            <div key={l.id} className="flex items-center gap-2 group mb-1">
+              <a href={l.url} target="_blank" rel="noopener noreferrer"
+                className="flex-1 truncate hover:underline" style={{ fontSize: 12, color: 'var(--oe-primary)' }}>{l.label}</a>
+              <button onClick={() => removeEntryLink(projectId, entry.id, l.id)}
+                className="opacity-0 group-hover:opacity-100 text-xs transition-opacity"
+                style={{ color: 'var(--text-disabled)' }}
+                onMouseEnter={e => (e.currentTarget.style.color = 'var(--color-danger-text)')}
+                onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-disabled)')}>×</button>
+            </div>
+          ))}
+          <div className="mt-2 pt-2 space-y-1.5" style={{ borderTop: '1px solid var(--border-default)' }}>
+            <input value={addLabel} onChange={(e) => setAddLabel(e.target.value)}
+              placeholder="Label (opcional)"
+              className="w-full focus:outline-none"
+              style={{ fontSize: 12, border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)', padding: '4px 8px', color: 'var(--text-primary)' }}
+              onFocus={e => (e.currentTarget.style.borderColor = 'var(--oe-primary)')}
+              onBlur={e => (e.currentTarget.style.borderColor = 'var(--border-default)')} />
+            <input value={addUrl} onChange={(e) => setAddUrl(e.target.value)}
+              placeholder="URL *"
+              className="w-full focus:outline-none"
+              style={{ fontSize: 12, border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)', padding: '4px 8px', color: 'var(--text-primary)' }}
+              onFocus={e => (e.currentTarget.style.borderColor = 'var(--oe-primary)')}
+              onBlur={e => (e.currentTarget.style.borderColor = 'var(--border-default)')}
+              onKeyDown={(e) => e.key === 'Enter' && handleAdd()} />
+            <button
+              onClick={handleAdd}
+              disabled={!addUrl.trim()}
+              className="w-full disabled:opacity-40 transition-colors"
+              style={{ fontSize: 12, background: 'var(--oe-primary)', color: 'white', borderRadius: 'var(--radius-md)', padding: '4px 8px' }}
+              onMouseEnter={e => { if (addUrl.trim()) (e.currentTarget.style.background = 'var(--oe-primary-hover)') }}
+              onMouseLeave={e => (e.currentTarget.style.background = 'var(--oe-primary)')}
+            >
+              Adicionar
+            </button>
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
+  )
+}
+
+// ─── CommentsCell ─────────────────────────────────────────────────────────────
+
+function CommentsCell({ entry, onOpen }: { entry: Entry; onOpen: () => void }) {
+  const count = entry.comments.length
+  return (
+    <button
+      onClick={onOpen}
+      title="Comentários"
+      className="relative flex items-center justify-center w-5 h-5 rounded transition-colors"
+      style={{ color: count > 0 ? 'var(--text-secondary)' : 'var(--text-disabled)' }}
+      onMouseEnter={e => (e.currentTarget.style.color = 'var(--text-tertiary)')}
+      onMouseLeave={e => (e.currentTarget.style.color = count > 0 ? 'var(--text-secondary)' : 'var(--text-disabled)')}
+    >
+      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+      </svg>
+      {count > 0 && (
+        <span
+          className="absolute -top-1 -right-1 flex items-center justify-center"
+          style={{ minWidth: 13, height: 13, background: 'var(--oe-primary-light)', color: 'var(--oe-primary)', fontSize: 9, borderRadius: 'var(--radius-pill)', padding: '0 3px', fontWeight: 500 }}
+        >
+          {count > 9 ? '9+' : count}
+        </span>
+      )}
+    </button>
+  )
+}
+
+// ─── DepsCell ─────────────────────────────────────────────────────────────────
+
+function DepsCell({ entry, phases, projectId }: {
+  entry: Entry
+  phases: Phase[]
+  projectId: string
+}) {
+  const { updateEntry } = useAppStore()
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(false)
+  const { triggerRef, popoverRef, position } = useSmartPosition(open)
+
+  const allEntriesMap = useMemo(() => {
+    const map = new Map<string, Entry>()
+    for (const ph of phases) {
+      for (const e of ph.entries) {
+        map.set(e.id, e as Entry)
+        for (const sub of e.subtasks) map.set(sub.id, sub as Entry)
+      }
+    }
+    return map
+  }, [phases])
+
+  function wouldCycle(candidateId: string): boolean {
+    if (candidateId === entry.id) return true
+    const visited = new Set<string>()
+    const queue = [candidateId]
+    while (queue.length > 0) {
+      const cur = queue.shift()!
+      if (cur === entry.id) return true
+      if (visited.has(cur)) continue
+      visited.add(cur)
+      const e = allEntriesMap.get(cur)
+      if (e) for (const dep of e.dependsOn) queue.push(dep)
+    }
+    return false
+  }
+
+  function toggle() {
+    setOpen((v) => !v)
+  }
+
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: MouseEvent) => {
+      if (
+        popoverRef.current && !popoverRef.current.contains(e.target as Node) &&
+        triggerRef.current && !triggerRef.current.contains(e.target as Node)
+      ) setOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [open])
+
+  function toggleDep(id: string) {
+    const next = entry.dependsOn.includes(id)
+      ? entry.dependsOn.filter((x) => x !== id)
+      : [...entry.dependsOn, id]
+    updateEntry(projectId, entry.id, { dependsOn: next })
+  }
+
+  const deps = entry.dependsOn
+
+  const trigger = deps.length === 0
+    ? (
+      <span
+        className="opacity-0 group-hover/row:opacity-60 transition-opacity cursor-pointer select-none"
+        style={{ fontSize: 11, color: 'var(--text-disabled)' }}
+      >+</span>
+    )
+    : (
+      <div className="flex flex-wrap gap-1 cursor-pointer">
+        {deps.slice(0, 2).map((id) => {
+          const e = allEntriesMap.get(id)
+          const name = e?.name
+          const prefix = e?.type === 'milestone' ? '◆ ' : ''
+          return (
+            <span
+              key={id}
+              className="truncate"
+              style={{ fontSize: 10, background: 'var(--surface-subtle)', border: '0.5px solid var(--border-default)', borderRadius: 'var(--radius-sm)', padding: '1px 6px', maxWidth: 80, color: 'var(--text-secondary)' }}
+              title={name ? `${name} (Finish-to-Start)` : id}
+            >
+              {prefix}{name ?? '?'}
+            </span>
+          )
+        })}
+        {deps.length > 2 && <span style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>+{deps.length - 2}</span>}
+      </div>
+    )
+
+  return (
+    <>
+      <div ref={triggerRef as any} onClick={toggle}>{trigger}</div>
+      {open && createPortal(
+        <div
+          ref={popoverRef as any}
+          style={{ position: 'fixed', ...position, zIndex: 1000, background: 'var(--surface-card)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-lg)' }}
+          className="py-2 w-60 max-h-80 overflow-y-auto"
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <p className="px-3 pb-1" style={{ fontSize: 10, fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-tertiary)' }}>
+            {t('plan.dependencies')}
+          </p>
+          {phases.map((ph) => {
+            const candidates = ph.entries.filter((e) => e.id !== entry.id)
+            if (candidates.length === 0) return null
+            return (
+              <div key={ph.id}>
+                <p className="px-3 py-1 mt-1" style={{ fontSize: 10, fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-secondary)', background: 'var(--surface-subtle)' }}>
+                  {ph.name}
+                </p>
+                {candidates.map((candidate) => {
+                  const checked = deps.includes(candidate.id)
+                  const circular = !checked && wouldCycle(candidate.id)
+                  const prefix = candidate.type === 'milestone' ? '◆ ' : ''
+                  return (
+                    <label
+                      key={candidate.id}
+                      className={`flex items-center gap-2 px-3 py-1.5 ${circular ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
+                      style={{ fontSize: 12, color: 'var(--text-secondary)' }}
+                      onMouseEnter={e => { if (!circular) (e.currentTarget.style.background = 'var(--surface-subtle)') }}
+                      onMouseLeave={e => (e.currentTarget.style.background = '')}
+                      title={circular ? t('errors.circularDep') : undefined}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={circular}
+                        onChange={() => !circular && toggleDep(candidate.id)}
+                        className="rounded"
+                      />
+                      <span className="truncate" style={candidate.type === 'milestone' ? { color: 'var(--color-warning-text)' } : {}}>
+                        {prefix}{candidate.name}
+                      </span>
+                    </label>
+                  )
+                })}
+              </div>
+            )
+          })}
+        </div>,
+        document.body,
+      )}
+    </>
+  )
+}
+
+// ─── TypePill ─────────────────────────────────────────────────────────────────
+
+function TypePill({ type }: { type: EntryType }) {
+  const { t } = useTranslation()
+  const styles: Record<EntryType, { bg: string; color: string }> = {
+    task:      { bg: '#EFF6FF', color: '#1E3A8A' },
+    milestone: { bg: '#FFFBEB', color: '#78350F' },
+    meeting:   { bg: '#F5F3FF', color: '#5B21B6' },
+  }
+  const s = styles[type]
+  return (
+    <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 'var(--radius-pill)', background: s.bg, color: s.color, fontWeight: 500, flexShrink: 0, whiteSpace: 'nowrap', border: '0.5px solid var(--border-default)' }}>
+      {t(`entry.${type}`)}
+    </span>
+  )
+}
+
+// ─── NameCell ─────────────────────────────────────────────────────────────────
+
+function NameCell({ entry, depth, projectId, linkedRisk, onSave, onOpenComments, onNavigateToRisk, onChangeRisk }: {
+  entry: Entry
+  depth: number
+  projectId: string
+  linkedRisk?: { id: string }
+  onSave: (v: string) => void
+  onOpenComments: () => void
+  onNavigateToRisk?: (riskId: string) => void
+  onChangeRisk: (f: RiskFlag) => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const indent = depth * 16
+
+  return (
+    <div className="flex items-center gap-1.5 min-w-0" style={{ paddingLeft: indent }}>
+      <TypePill type={entry.type} />
+      <span className={entry.riskFlag !== 'none' ? '' : 'opacity-0 group-hover/row:opacity-100 transition-opacity'}>
+        <RiskCell flag={entry.riskFlag} linkedRiskId={linkedRisk?.id} onChange={onChangeRisk} onNavigateToRisk={onNavigateToRisk} />
+      </span>
+      <span className={entry.comments.length > 0 ? '' : 'opacity-0 group-hover/row:opacity-100 transition-opacity'}>
+        <CommentsCell entry={entry} onOpen={onOpenComments} />
+      </span>
+      <span className={entry.links.length > 0 ? '' : 'opacity-0 group-hover/row:opacity-100 transition-opacity'}>
+        <LinksCell entry={entry} projectId={projectId} />
+      </span>
+      {editing ? (
+        <input
+          autoFocus
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => { onSave(draft); setEditing(false) }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') { onSave(draft); setEditing(false) }
+            if (e.key === 'Escape') setEditing(false)
+          }}
+          className="flex-1 min-w-0 bg-transparent outline-none"
+          style={{ fontSize: 12, color: 'var(--text-primary)', borderBottom: '1px solid var(--oe-primary)' }}
+        />
+      ) : (
+        <>
+          <span
+            onClick={() => { setDraft(entry.name); setEditing(true) }}
+            className="flex-1 min-w-0 truncate cursor-text"
+            style={{ fontSize: 12, color: 'var(--text-primary)' }}
+          >
+            {entry.name}
+          </span>
+          <button
+            onClick={() => { setDraft(entry.name); setEditing(true) }}
+            className="opacity-0 group-hover/row:opacity-100 transition-opacity shrink-0"
+            style={{ color: 'var(--text-tertiary)' }}
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+            </svg>
+          </button>
+        </>
+      )}
+    </div>
+  )
+}
+
+// ─── ResponsibleCell ─────────────────────────────────────────────────────────
+
+function memberInitials(name: string): string {
+  const parts = name.trim().split(/\s+/)
+  return parts.length >= 2
+    ? (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
+    : name.slice(0, 2).toUpperCase()
+}
+
+function ResponsibleCell({ entry, project, projectId }: {
+  entry: Entry
+  project: Project
+  projectId: string
+}) {
+  const { updateEntry } = useAppStore()
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(false)
+  const { triggerRef, popoverRef, position } = useSmartPosition(open)
+  const [mode, setMode] = useState<'member' | 'free'>('free')
+  const [freeText, setFreeText] = useState('')
+
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: MouseEvent) => {
+      if (
+        popoverRef.current && !popoverRef.current.contains(e.target as Node) &&
+        triggerRef.current && !triggerRef.current.contains(e.target as Node)
+      ) setOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [open])
+
+  function openPopover() {
+    setFreeText(entry.responsible)
+    setMode(entry.responsibleMode ?? 'free')
+    setOpen((v) => !v)
+  }
+
+  function selectMember(member: TeamMember) {
+    updateEntry(projectId, entry.id, { responsible: member.name, responsibleMemberId: member.id, responsibleMode: 'member' })
+    setOpen(false)
+  }
+
+  function saveFreeText() {
+    updateEntry(projectId, entry.id, { responsible: freeText.trim(), responsibleMemberId: undefined, responsibleMode: 'free' })
+    setOpen(false)
+  }
+
+  const trigger = entry.responsible ? (
+    <button ref={triggerRef as any} onClick={openPopover} className="flex items-center gap-1.5 min-w-0 max-w-full">
+      {entry.responsibleMemberId && (
+        <span
+          className="flex items-center justify-center shrink-0"
+          style={{ width: 18, height: 18, borderRadius: '50%', background: 'var(--oe-primary)', color: 'white', fontSize: 9, fontWeight: 600 }}
+        >
+          {memberInitials(entry.responsible)}
+        </span>
+      )}
+      <span className="truncate" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+        {entry.responsible}
+      </span>
+    </button>
+  ) : (
+    <button
+      ref={triggerRef as any}
+      onClick={openPopover}
+      className="opacity-0 group-hover/row:opacity-100 transition-opacity"
+      style={{ fontSize: 11, color: 'var(--text-disabled)' }}
+    >
+      —
+    </button>
+  )
+
+  return (
+    <>
+      {trigger}
+      {open && createPortal(
+        <div
+          ref={popoverRef as any}
+          style={{ position: 'fixed', ...position, zIndex: 1000, background: 'var(--surface-card)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-lg)', width: 200 }}
+          className="py-2"
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          {/* Mode toggle */}
+          <div className="flex gap-1 px-2 pb-2" style={{ borderBottom: '0.5px solid var(--border-default)' }}>
+            {(['member', 'free'] as const).map((m) => (
+              <button
+                key={m}
+                onClick={() => setMode(m)}
+                className="flex-1 py-1 transition-colors"
+                style={{
+                  fontSize: 11, borderRadius: 'var(--radius-md)',
+                  background: mode === m ? 'var(--oe-primary-light)' : 'transparent',
+                  color: mode === m ? 'var(--oe-primary)' : 'var(--text-tertiary)',
+                  fontWeight: mode === m ? 500 : 400,
+                }}
+              >
+                {t(m === 'member' ? 'tasks.memberMode' : 'tasks.freeMode')}
+              </button>
+            ))}
+          </div>
+
+          {mode === 'member' ? (
+            <div className="py-1">
+              {project.team.length === 0 ? (
+                <p className="px-3 py-2" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>Sem membros na equipe.</p>
+              ) : (
+                project.team.map((member) => (
+                  <button
+                    key={member.id}
+                    onClick={() => selectMember(member)}
+                    className="w-full flex items-center gap-2 px-3 py-1.5"
+                    style={{ fontSize: 12, color: entry.responsibleMemberId === member.id ? 'var(--oe-primary)' : 'var(--text-secondary)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--surface-subtle)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = '')}
+                  >
+                    <span
+                      className="flex items-center justify-center shrink-0"
+                      style={{ width: 20, height: 20, borderRadius: '50%', background: 'var(--oe-primary)', color: 'white', fontSize: 9, fontWeight: 600 }}
+                    >
+                      {memberInitials(member.name)}
+                    </span>
+                    <span className="flex-1 truncate text-left">{member.name}</span>
+                    {entry.responsibleMemberId === member.id && <span style={{ fontSize: 10, color: 'var(--oe-primary)' }}>✓</span>}
+                  </button>
+                ))
+              )}
+            </div>
+          ) : (
+            <div className="px-2 pt-2 pb-1 space-y-1.5">
+              <input
+                autoFocus
+                value={freeText}
+                onChange={(e) => setFreeText(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') saveFreeText(); if (e.key === 'Escape') setOpen(false) }}
+                placeholder="Nome..."
+                className="w-full focus:outline-none"
+                style={{ fontSize: 12, border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)', padding: '4px 8px', color: 'var(--text-primary)' }}
+                onFocus={e => (e.currentTarget.style.borderColor = 'var(--oe-primary)')}
+                onBlur={e => (e.currentTarget.style.borderColor = 'var(--border-default)')}
+              />
+              <button
+                onClick={saveFreeText}
+                className="w-full transition-colors"
+                style={{ fontSize: 11, background: 'var(--oe-primary)', color: 'white', borderRadius: 'var(--radius-md)', padding: '4px 8px' }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'var(--oe-primary-hover)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'var(--oe-primary)')}
+              >
+                OK
+              </button>
+            </div>
+          )}
+        </div>,
+        document.body,
+      )}
+    </>
+  )
+}
+
+// ─── DelayModal (inline) ──────────────────────────────────────────────────────
+
+function DelayModal({ pending, holidays, onConfirm, onSkip }: {
+  pending: PendingDate
+  holidays: string[]
+  onConfirm: (j: { description: string; responsibility: DelayLogEntry['responsibility']; type: DelayLogEntry['type'] }) => void
+  onSkip: () => void
+}) {
+  const { t } = useTranslation()
+  const [description, setDescription] = useState('')
+  const [responsibility, setResponsibility] = useState<DelayLogEntry['responsibility']>('internal')
+  const [type, setType] = useState<DelayLogEntry['type']>('execution')
+  const d = pending.diffDays
+
+  return (
+    <Modal open title={t('delay.title')} onClose={onSkip} size="sm"
+      footer={
+        <>
+          <Button variant="ghost" onClick={onSkip}>{t('delay.skip')}</Button>
+          <Button onClick={() => onConfirm({ description, responsibility, type })}>{t('delay.confirm')}</Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        {d !== 0 && (
+          <div className={`rounded-lg px-4 py-3 text-sm font-semibold ${d > 0 ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'}`}>
+            {d > 0 ? '+' : ''}{d}d
+          </div>
+        )}
+        <Field label={t('delay.responsibility')}>
+          <Select value={responsibility} onChange={(e) => setResponsibility(e.target.value as typeof responsibility)}>
+            <option value="internal">{t('delay.internal')}</option>
+            <option value="client_business">{t('delay.client_business')}</option>
+            <option value="client_it">{t('delay.client_it')}</option>
+            <option value="client_provider">{t('delay.client_provider')}</option>
+          </Select>
+        </Field>
+        <Field label={t('delay.type')}>
+          <Select value={type} onChange={(e) => setType(e.target.value as typeof type)}>
+            <option value="execution">{t('delay.execution')}</option>
+            <option value="definition">{t('delay.definition')}</option>
+            <option value="planning">{t('delay.planning')}</option>
+          </Select>
+        </Field>
+        <Field label={t('delay.description')}>
+          <Textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={3} />
+        </Field>
+      </div>
+    </Modal>
+  )
+}
+
+// ─── PhaseHeader ──────────────────────────────────────────────────────────────
+
+function PhaseHeader({ phase, colSpan, collapsed, onToggle, onAdd, onDelete, onRename }: {
+  phase: Phase; colSpan: number; collapsed: boolean
+  onToggle: () => void; onAdd: () => void; onDelete: () => void; onRename: (name: string) => void
+}) {
+  const { t } = useTranslation()
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(phase.name)
+  const entryCount = phase.entries.length + phase.entries.reduce((n, e) => n + e.subtasks.length, 0)
+
+  return (
+    <tr className="select-none" style={{ background: 'var(--surface-subtle)', borderBottom: '0.5px solid var(--border-default)' }}>
+      <td colSpan={colSpan} style={{ padding: '5px 12px' }}>
+        <div className="flex items-center gap-3">
+          <button onClick={onToggle}
+            className="w-4 text-xs transition-colors"
+            style={{ color: 'var(--text-tertiary)' }}>
+            {collapsed ? '▸' : '▾'}
+          </button>
+
+          {editing ? (
+            <input
+              autoFocus value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onBlur={() => { onRename(draft); setEditing(false) }}
+              onKeyDown={(e) => { if (e.key === 'Enter') { onRename(draft); setEditing(false) } if (e.key === 'Escape') { setDraft(phase.name); setEditing(false) } }}
+              className="text-[11px] rounded px-2 py-0.5 outline-none min-w-0 flex-1"
+              style={{ background: 'var(--surface-card)', border: '1px solid var(--oe-primary)', color: 'var(--text-primary)' }}
+            />
+          ) : (
+            <span
+              onDoubleClick={() => { setDraft(phase.name); setEditing(true) }}
+              className="flex-1 cursor-default"
+              style={{ fontSize: 10, fontWeight: 500, letterSpacing: '0.05em', textTransform: 'uppercase', color: 'var(--text-tertiary)' }}
+              title="Clique duplo para renomear"
+            >
+              {phase.name}
+            </span>
+          )}
+
+          <span className="text-[10px]" style={{ color: 'var(--text-tertiary)' }}>{entryCount} {t('template.entries')}</span>
+
+          <div className="flex items-center gap-1 ml-auto">
+            <button onClick={onAdd}
+              className="text-[11px] px-2 py-0.5 rounded transition-colors"
+              style={{ color: 'var(--text-tertiary)' }}
+              onMouseEnter={e => (e.currentTarget.style.color = 'var(--oe-primary)')}
+              onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-tertiary)')}>
+              {t('plan.addEntry')}
+            </button>
+            <button onClick={onDelete}
+              className="text-[11px] px-1 py-0.5 rounded transition-colors"
+              style={{ color: 'var(--text-disabled)' }}
+              onMouseEnter={e => (e.currentTarget.style.color = 'var(--color-danger-text)')}
+              onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-disabled)')}
+              title={t('actions.delete')}>
+              ✕
+            </button>
+          </div>
+        </div>
+      </td>
+    </tr>
+  )
+}
+
+// ─── PlanPage ─────────────────────────────────────────────────────────────────
+
+export default function PlanPage({ projectId, onNavigateToRisk }: { projectId: string; onNavigateToRisk?: (riskId: string) => void }) {
+  const {
+    projects, settings,
+    updateEntry, deleteEntry, updateEntryStatus, resetStatusOverride, updateEntryRisk,
+    updatePhase, deletePhase, setBaseline, clearBaseline, changeEntryDate, addDelayLogEntry,
+    addPhase, setColumnVisibility,
+  } = useAppStore()
+
+  const { t } = useTranslation()
+  const project = projects.find((p) => p.id === projectId)!
+
+  const [collapsedPhases, setCollapsedPhases] = useState<Set<string>>(new Set())
+  const [addModal, setAddModal] = useState<{ type: EntryType; phaseId?: string; parentId?: string } | null>(null)
+  const [commentsEntry, setCommentsEntry] = useState<Entry | null>(null)
+  const [pendingDate, setPendingDate] = useState<PendingDate | null>(null)
+  const [addingPhase, setAddingPhase] = useState(false)
+  const [newPhaseName, setNewPhaseName] = useState('')
+  const [colMenuOpen, setColMenuOpen] = useState(false)
+  const { triggerRef: colMenuTriggerRef, popoverRef: colMenuPopoverRef, position: colMenuPosition } = useSmartPosition(colMenuOpen)
+  const [columnVisibility, setColVisLocal] = useState<Record<string, boolean>>(project.columnVisibility ?? {})
+
+  function handleColVisChange(updater: ((prev: Record<string, boolean>) => Record<string, boolean>) | Record<string, boolean>) {
+    const next = typeof updater === 'function' ? updater(columnVisibility) : updater
+    setColVisLocal(next)
+    setColumnVisibility(projectId, next)
+  }
+
+  useEffect(() => {
+    if (!colMenuOpen) return
+    const handler = (e: MouseEvent) => {
+      if (
+        colMenuPopoverRef.current && !colMenuPopoverRef.current.contains(e.target as Node) &&
+        colMenuTriggerRef.current && !colMenuTriggerRef.current.contains(e.target as Node)
+      ) setColMenuOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [colMenuOpen])
+
+  useEffect(() => {
+    if (!colMenuOpen) return
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') setColMenuOpen(false) }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [colMenuOpen])
+
+  const today = useMemo(() => new Date().toISOString().split('T')[0], [])
+
+  // Build a lookup: entryId → entry name
+  const entryNameMap = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const ph of project.phases) {
+      for (const e of ph.entries) {
+        map.set(e.id, e.name)
+        for (const sub of e.subtasks) map.set(sub.id, sub.name)
+      }
+    }
+    return map
+  }, [project.phases])
+
+  // Find which phaseId an entry belongs to
+  const entryPhaseMap = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const ph of project.phases) {
+      for (const e of ph.entries) {
+        map.set(e.id, ph.id)
+        for (const sub of e.subtasks) map.set(sub.id, ph.id)
+      }
+    }
+    return map
+  }, [project.phases])
+
+  // Build flat data for TanStack (entries → subRows for subtasks)
+  const data = useMemo<PlanRow[]>(() => {
+    return project.phases.flatMap((ph) =>
+      ph.entries.map((e) => ({
+        ...e,
+        _phaseId: ph.id,
+        subRows: e.subtasks.length > 0
+          ? e.subtasks.map((sub) => ({ ...sub, _phaseId: ph.id }))
+          : undefined,
+      })),
+    )
+  }, [project.phases])
+
+  // ── Date change handler ────────────────────────────────────────────────────
+
+  function requestDateChange(
+    entry: Entry,
+    field: PendingDate['field'],
+    value: string,
+  ) {
+    if (!value) return
+
+    // For actual fields, apply directly — no justification modal needed
+    if (field === 'actualStart' || field === 'actualEnd') {
+      changeEntryDate(projectId, entry.id, field, value)
+      return
+    }
+
+    // Calculate diff from previous planned value (for delay log)
+    const prevIso =
+      field === 'plannedEnd'  ? entry.plannedEnd :
+      field === 'plannedDate' ? entry.plannedDate :
+                                entry.plannedStart
+    let diffDays = 0
+    if (prevIso && (field === 'plannedEnd' || field === 'plannedDate')) {
+      diffDays = workdaysBetween(
+        parseISO(prevIso), parseISO(value),
+        parseHolidays(settings.holidays),
+      )
+    }
+
+    // Apply date change to store immediately so setBaseline always sees current state
+    changeEntryDate(projectId, entry.id, field, value)
+
+    // Open justification modal for tracking — only when there is a measurable shift
+    if (diffDays !== 0) {
+      setPendingDate({ entryId: entry.id, field, value, diffDays })
+    }
+  }
+
+  function applyPendingDate(justification?: { description: string; responsibility: DelayLogEntry['responsibility']; type: DelayLogEntry['type'] }) {
+    if (!pendingDate) return
+    // Date is already in the store — just record the justification entry if provided
+    if (justification) {
+      addDelayLogEntry(projectId, {
+        date: new Date().toISOString().split('T')[0],
+        entryId: pendingDate.entryId,
+        entryName: entryNameMap.get(pendingDate.entryId) ?? '',
+        days: pendingDate.diffDays,
+        responsibility: justification.responsibility,
+        type: justification.type,
+        description: justification.description,
+        comments: '',
+        triggeredBy: 'manual',
+      })
+    }
+    setPendingDate(null)
+  }
+
+  // ── Columns ───────────────────────────────────────────────────────────────
+
+  const columns = useMemo<ColumnDef<PlanRow>[]>(() => [
+    // Expand toggle
+    {
+      id: 'expand', size: 28,
+      header: () => null,
+      cell: ({ row }) => row.getCanExpand()
+        ? <button onClick={row.getToggleExpandedHandler()} className="text-xs w-4 transition-colors" style={{ color: 'var(--text-tertiary)' }} onMouseEnter={e => (e.currentTarget.style.color = 'var(--text-secondary)')} onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-tertiary)')}>{row.getIsExpanded() ? '▾' : '▸'}</button>
+        : <span className="w-4 inline-block" />,
+    },
+    // Name (with TypePill + icons inline)
+    {
+      id: 'name', size: 300,
+      header: () => <span>{t('entry.name')}</span>,
+      cell: ({ row }) => {
+        const e = row.original
+        const linkedRisk = project.risks.find((r) => r.linkedEntryIds.includes(e.id))
+        return (
+          <NameCell
+            entry={e}
+            depth={row.depth}
+            projectId={projectId}
+            linkedRisk={linkedRisk}
+            onSave={(v) => updateEntry(projectId, e.id, { name: v })}
+            onOpenComments={() => setCommentsEntry(e)}
+            onNavigateToRisk={onNavigateToRisk}
+            onChangeRisk={(f) => updateEntryRisk(projectId, e.id, f)}
+          />
+        )
+      },
+    },
+    // Responsible
+    {
+      id: 'responsible', size: 120,
+      header: () => <span>{t('entry.responsible')}</span>,
+      cell: ({ row }) => (
+        <ResponsibleCell entry={row.original} project={project} projectId={projectId} />
+      ),
+    },
+    // Dependencies
+    {
+      id: 'deps', size: 130,
+      header: () => <span>{t('plan.colDeps')}</span>,
+      cell: ({ row }) => (
+        <DepsCell entry={row.original} phases={project.phases} projectId={projectId} />
+      ),
+    },
+    // Planned Start / Date
+    {
+      id: 'dateStart', size: 98,
+      header: () => <span>{t('plan.colStart')}</span>,
+      cell: ({ row }) => {
+        const e = row.original
+        if (e.type !== 'task') {
+          const { iso, isActual, editField } = displayEnd(e)
+          const isOverdue = !isActual && e.status === 'overdue'
+          return <DateCell iso={iso} isActual={isActual} isOverdue={isOverdue} onCommit={(v) => requestDateChange(e, editField, v)} />
+        }
+        const { iso, isActual, editField } = displayStart(e)
+        const isOverdue = !isActual && e.status === 'overdue'
+        return <DateCell iso={iso} isActual={isActual} isOverdue={isOverdue} onCommit={(v) => requestDateChange(e, editField, v)} />
+      },
+    },
+    // Planned End (tasks only)
+    {
+      id: 'dateEnd', size: 98,
+      header: () => <span>{t('plan.colEnd')}</span>,
+      cell: ({ row }) => {
+        const e = row.original
+        if (e.type !== 'task') return <span style={{ fontSize: 11, color: 'var(--text-disabled)' }}>—</span>
+        const { iso, isActual, editField } = displayEnd(e)
+        const isOverdue = !isActual && e.status === 'overdue'
+        return <DateCell iso={iso} isActual={isActual} isOverdue={isOverdue} onCommit={(v) => requestDateChange(e, editField, v)} />
+      },
+    },
+    // BL Start
+    {
+      id: 'blStart', size: 98,
+      header: () => <span>{t('entry.baselineStart')}</span>,
+      cell: ({ row }) => {
+        const e = row.original
+        if (!project.baselineSetAt || e.type !== 'task') return <span style={{ fontSize: 11, color: 'var(--text-disabled)' }}>—</span>
+        return <DateCell iso={e.baselineStart} isBaseline editable={false} onCommit={() => {}} />
+      },
+    },
+    // BL End / BL Date
+    {
+      id: 'blEnd', size: 98,
+      header: () => <span>{t('entry.baselineEnd')}</span>,
+      cell: ({ row }) => {
+        const e = row.original
+        if (!project.baselineSetAt) return <span style={{ fontSize: 11, color: 'var(--text-disabled)' }}>—</span>
+        const blDate = e.type === 'task' ? e.baselineEnd : e.baselineDate
+        return <DateCell iso={blDate} isBaseline editable={false} onCommit={() => {}} />
+      },
+    },
+    // Variance
+    {
+      id: 'variance', size: 72,
+      header: () => <span>{t('entry.variance')}</span>,
+      cell: ({ row }) => {
+        if (!project.baselineSetAt) return <span style={{ fontSize: 11, color: 'var(--text-disabled)' }}>—</span>
+        const v = computeDisplayVariance(row.original, settings.holidays)
+        if (v === undefined) return <span style={{ fontSize: 11, color: 'var(--text-disabled)' }}>—</span>
+        if (v === 0) return <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>0</span>
+        return (
+          <span style={{ fontSize: 11, fontWeight: 500, color: v > 0 ? 'var(--color-danger-text)' : 'var(--color-success-text)' }}>
+            {v > 0 ? '+' : ''}{v}d
+          </span>
+        )
+      },
+    },
+    // Duration
+    {
+      id: 'duration', size: 72,
+      header: () => <span>{t('plan.colDuration')}</span>,
+      cell: ({ row }) => {
+        const e = row.original
+        if (e.type === 'task' && e.durationDays)
+          return <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{e.durationDays}d</span>
+        if (e.type === 'meeting' && e.durationHours)
+          return <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{e.durationHours}h</span>
+        return <span style={{ fontSize: 11, color: 'var(--text-disabled)' }}>—</span>
+      },
+    },
+    // Status
+    {
+      id: 'status', size: 175,
+      header: () => <span>{t('entry.status')}</span>,
+      cell: ({ row }) => {
+        const e = row.original
+        const autoStatus = computeAutoStatus(e, today)
+        const showOverridePin = e.statusOverride && autoStatus === 'overdue'
+        return (
+          <div className="flex items-center gap-1">
+            <StatusBadge
+              value={e.status}
+              onChange={(v) => updateEntryStatus(projectId, e.id, v as EntryStatus)}
+              options={[
+                { value: 'pending', label: t('status.pending') },
+                { value: 'in_progress', label: t('status.in_progress') },
+                { value: 'done', label: t('status.done') },
+                { value: 'blocked', label: t('status.blocked') },
+                ...(e.status === 'overdue' ? [{ value: 'overdue', label: t('status.overdue') }] : []),
+              ]}
+            />
+            {showOverridePin && (
+              <button
+                onClick={() => resetStatusOverride(projectId, e.id)}
+                title={t('status.manualOverride')}
+                className="text-amber-500 hover:text-amber-700 text-sm shrink-0"
+              >
+                📌
+              </button>
+            )}
+          </div>
+        )
+      },
+    },
+    // Actions
+    {
+      id: 'actions', size: 60,
+      header: () => null,
+      cell: ({ row }) => {
+        const e = row.original
+        const phaseId = entryPhaseMap.get(e.id) ?? e._phaseId
+        return (
+          <div className="flex items-center gap-0.5 opacity-0 group-hover/row:opacity-100 transition-opacity">
+            {row.depth === 0 && (
+              <button
+                onClick={() => setAddModal({ type: 'task', phaseId, parentId: e.id })}
+                className="w-5 h-5 flex items-center justify-center rounded transition-colors"
+                style={{ fontSize: 12, color: 'var(--text-tertiary)' }}
+                onMouseEnter={ev => { ev.currentTarget.style.color = 'var(--oe-primary)'; ev.currentTarget.style.background = 'var(--oe-primary-light)' }}
+                onMouseLeave={ev => { ev.currentTarget.style.color = 'var(--text-tertiary)'; ev.currentTarget.style.background = '' }}
+                title="Adicionar subtarefa"
+              >+</button>
+            )}
+            <button
+              onClick={() => deleteEntry(projectId, phaseId, e.id)}
+              className="w-5 h-5 flex items-center justify-center rounded transition-colors"
+              style={{ fontSize: 12, color: 'var(--text-disabled)' }}
+              onMouseEnter={ev => { ev.currentTarget.style.color = 'var(--color-danger-text)'; ev.currentTarget.style.background = 'var(--color-danger-bg)' }}
+              onMouseLeave={ev => { ev.currentTarget.style.color = 'var(--text-disabled)'; ev.currentTarget.style.background = '' }}
+              title="Excluir"
+            >✕</button>
+          </div>
+        )
+      },
+    },
+  ], [project, settings.holidays, entryPhaseMap, projectId,
+    updateEntry, updateEntryStatus, updateEntryRisk, deleteEntry])
+
+  const table = useReactTable<PlanRow>({
+    data,
+    columns,
+    getSubRows: (row) => row.subRows,
+    getCoreRowModel: getCoreRowModel(),
+    getExpandedRowModel: getExpandedRowModel(),
+    state: { columnVisibility, expanded: true as any },
+    onColumnVisibilityChange: handleColVisChange as any,
+    initialState: { expanded: true },
+  })
+
+  // Phase map for header rendering
+  const phaseMap = useMemo(() => new Map(project.phases.map((ph) => [ph.id, ph])), [project.phases])
+
+  // Render rows with phase header injection
+  let renderPhaseId = ''
+
+  // ── Render ────────────────────────────────────────────────────────────────
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Toolbar */}
+      <div className="px-4 py-2.5 flex flex-wrap items-center gap-1.5" style={{ background: 'var(--surface-card)', borderBottom: '1px solid var(--border-default)' }}>
+        {/* Add buttons */}
+        <div className="flex items-center gap-1">
+          {([['task', t('plan.addTask')], ['milestone', t('plan.addMilestone')], ['meeting', t('plan.addMeeting')]] as [EntryType, string][]).map(([type, label]) => (
+            <Button key={type} size="xs" variant="pill"
+              onClick={() => setAddModal({ type, phaseId: project.phases[0]?.id })}>
+              {label}
+            </Button>
+          ))}
+          <Button size="xs" variant="pill" onClick={() => setAddingPhase(true)}>
+            {t('plan.addPhase')}
+          </Button>
+        </div>
+
+        <div className="flex-1" />
+
+        {/* Column visibility */}
+        <span ref={colMenuTriggerRef as any}>
+          <Button size="sm" variant="secondary" onClick={() => setColMenuOpen((v) => !v)}>
+            {t('plan.columns')}
+          </Button>
+        </span>
+
+        {/* Baseline */}
+        {project.baselineSetAt ? (
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] px-2 py-1 rounded-[var(--radius-sm)]" style={{ background: 'var(--color-success-bg)', color: 'var(--color-success-text)', border: '1px solid #bbf7d0' }}>
+              BL: {fmtDate(project.baselineSetAt.split('T')[0])}
+            </span>
+            <Button size="sm" variant="secondary"
+              onClick={() => { if (confirm(t('plan.confirmRebaseline'))) setBaseline(projectId) }}>
+              {t('plan.rebaseline')}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => clearBaseline(projectId)}>{t('plan.clearBaseline')}</Button>
+          </div>
+        ) : (
+          <Button size="sm" variant="primary"
+            onClick={() => { if (confirm(t('plan.confirmBaseline'))) setBaseline(projectId) }}>
+            {t('plan.setBaseline')}
+          </Button>
+        )}
+      </div>
+
+      {/* Add phase inline */}
+      {addingPhase && (
+        <div className="px-4 py-2 flex items-center gap-2" style={{ background: 'var(--surface-subtle)', borderBottom: '1px solid var(--border-default)' }}>
+          <input
+            autoFocus value={newPhaseName} onChange={(e) => setNewPhaseName(e.target.value)}
+            placeholder="Nome da fase"
+            className="text-[13px] px-3 py-1.5 focus:outline-none focus:ring-1 w-64 transition-colors"
+            style={{ border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)', color: 'var(--text-primary)' }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && newPhaseName.trim()) {
+                addPhase(projectId, newPhaseName.trim())
+                setNewPhaseName(''); setAddingPhase(false)
+              }
+              if (e.key === 'Escape') { setNewPhaseName(''); setAddingPhase(false) }
+            }}
+          />
+          <Button size="sm" onClick={() => {
+            if (newPhaseName.trim()) { addPhase(projectId, newPhaseName.trim()) }
+            setNewPhaseName(''); setAddingPhase(false)
+          }} disabled={!newPhaseName.trim()}>{t('actions.add')}</Button>
+          <Button size="sm" variant="ghost" onClick={() => { setNewPhaseName(''); setAddingPhase(false) }}>{t('actions.cancel')}</Button>
+        </div>
+      )}
+
+      {/* Table */}
+      <div className="flex-1 overflow-auto">
+        <table className="w-full border-collapse" style={{ minWidth: 1300 }}>
+          <thead className="sticky top-0 z-10" style={{ background: 'var(--surface-subtle)' }}>
+            {table.getHeaderGroups().map((hg) => (
+              <tr key={hg.id} style={{ borderBottom: '1px solid var(--border-default)' }}>
+                {hg.headers.map((header) => (
+                  <th
+                    key={header.id}
+                    className="text-left px-2 py-2 whitespace-nowrap"
+                    style={{ width: header.getSize(), minWidth: header.getSize(), fontSize: 10, fontWeight: 500, letterSpacing: '0.03em', textTransform: 'uppercase', color: 'var(--text-tertiary)' }}
+                  >
+                    {flexRender(header.column.columnDef.header, header.getContext())}
+                  </th>
+                ))}
+              </tr>
+            ))}
+          </thead>
+          <tbody>
+            {table.getRowModel().rows.length === 0 && (
+              <tr>
+                <td colSpan={columns.length} className="text-center py-16 text-[13px]" style={{ color: 'var(--text-tertiary)' }}>
+                  {t('plan.noEntries')} {t('plan.noEntriesSub')}
+                </td>
+              </tr>
+            )}
+            {table.getRowModel().rows.flatMap((row) => {
+              const phaseId = row.original._phaseId
+              const phase = phaseMap.get(phaseId)
+              const isNewPhase = phaseId !== renderPhaseId
+              if (isNewPhase) renderPhaseId = phaseId
+
+              const isCollapsed = collapsedPhases.has(phaseId)
+              const items: React.ReactNode[] = []
+
+              if (isNewPhase && phase) {
+                items.push(
+                  <PhaseHeader
+                    key={`phase-${phaseId}`}
+                    phase={phase}
+                    colSpan={columns.length}
+                    collapsed={isCollapsed}
+                    onToggle={() => setCollapsedPhases((s) => {
+                      const next = new Set(s)
+                      if (next.has(phaseId)) next.delete(phaseId); else next.add(phaseId)
+                      return next
+                    })}
+                    onAdd={() => setAddModal({ type: 'task', phaseId })}
+                    onDelete={() => { if (confirm(t('template.confirmDeletePhase'))) deletePhase(projectId, phaseId) }}
+                    onRename={(name) => updatePhase(projectId, phaseId, { name })}
+                  />,
+                )
+              }
+
+              if (!isCollapsed) {
+                const e = row.original
+                const autoStatus = computeAutoStatus(e, today)
+                const isSpecialRow = e.status === 'overdue' || (e.statusOverride && autoStatus === 'overdue')
+                const rowBg = e.status === 'overdue'
+                  ? 'var(--color-danger-bg)'
+                  : (e.statusOverride && autoStatus === 'overdue')
+                    ? 'var(--color-warning-bg)'
+                    : 'var(--surface-card)'
+                items.push(
+                  <tr
+                    key={row.id}
+                    className="group/row transition-colors"
+                    style={{ borderBottom: '0.5px solid var(--border-default)', background: rowBg }}
+                    onMouseEnter={ev => { if (!isSpecialRow) (ev.currentTarget as HTMLElement).style.background = 'rgba(232,89,12,0.03)' }}
+                    onMouseLeave={ev => { if (!isSpecialRow) (ev.currentTarget as HTMLElement).style.background = 'var(--surface-card)' }}
+                  >
+                    {row.getVisibleCells().map((cell) => (
+                      <td
+                        key={cell.id}
+                        style={{ width: cell.column.getSize(), maxWidth: cell.column.getSize() }}
+                        className="px-2 py-1.5 overflow-hidden"
+                      >
+                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                      </td>
+                    ))}
+                  </tr>,
+                )
+              }
+
+              return items
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Column visibility menu */}
+      {colMenuOpen && createPortal(
+        <div
+          ref={colMenuPopoverRef as any}
+          style={{ position: 'fixed', ...colMenuPosition, zIndex: 1000, background: 'var(--surface-card)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-lg)' }}
+          className="py-2 w-48"
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          {TOGGLEABLE_COLS.map(({ id, key }) => {
+            const col = table.getColumn(id)
+            if (!col) return null
+            return (
+              <label key={id} className="flex items-center gap-2 px-3 py-1.5 cursor-pointer text-[12px]" style={{ color: 'var(--text-secondary)' }} onMouseEnter={e => (e.currentTarget.style.background = 'var(--surface-subtle)')} onMouseLeave={e => (e.currentTarget.style.background = '')}>
+                <input type="checkbox" checked={col.getIsVisible()} onChange={col.getToggleVisibilityHandler()} className="rounded" />
+                {t(key as any)}
+              </label>
+            )
+          })}
+        </div>,
+        document.body,
+      )}
+
+      {/* Delay modal */}
+      {pendingDate && (
+        <DelayModal
+          pending={pendingDate}
+          holidays={settings.holidays}
+          onConfirm={(j) => applyPendingDate(j)}
+          onSkip={() => applyPendingDate()}
+        />
+      )}
+
+      {/* Comments panel */}
+      {commentsEntry && (
+        <CommentsPanel
+          projectId={projectId}
+          entry={commentsEntry}
+          onClose={() => setCommentsEntry(null)}
+        />
+      )}
+
+      {/* Add entry modal */}
+      {addModal && (
+        <AddEntryModal
+          open
+          projectId={projectId}
+          phases={project.phases}
+          defaultType={addModal.type}
+          defaultPhaseId={addModal.phaseId}
+          parentId={addModal.parentId}
+          entryNameMap={entryNameMap}
+          onClose={() => setAddModal(null)}
+        />
+      )}
+    </div>
+  )
+}

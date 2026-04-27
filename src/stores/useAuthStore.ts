@@ -10,6 +10,7 @@ interface AuthState {
   setUser: (user: User | null) => void
   signInWithGoogle: () => Promise<void>
   signOut: () => Promise<void>
+  initialize: () => Promise<void>
   loadProfile: () => Promise<void>
 }
 
@@ -32,17 +33,41 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({ user: null, profile: null })
   },
 
+  // Primary auth check — call this on app mount before onAuthStateChange
+  initialize: async () => {
+    try {
+      const { data: { session } } = await supabase.auth.getSession()
+      if (session?.user) {
+        set({ user: session.user, loading: false })
+        // Load profile in background — don't block the auth gate
+        supabase
+          .from('profiles')
+          .select('*')
+          .eq('id', session.user.id)
+          .single()
+          .then(({ data }) => set({ profile: data as DbProfile | null }))
+      } else {
+        set({ user: null, profile: null, loading: false })
+      }
+    } catch {
+      set({ user: null, profile: null, loading: false })
+    }
+  },
+
+  // Full profile load (used after sign-in events)
   loadProfile: async () => {
-    const { data: { user } } = await supabase.auth.getUser()
-    if (!user) { set({ user: null, profile: null, loading: false }); return }
-
-    set({ user })
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('id', user.id)
-      .single()
-
-    set({ profile: profile as DbProfile | null, loading: false })
+    try {
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user) { set({ user: null, profile: null, loading: false }); return }
+      set({ user, loading: false })
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', user.id)
+        .single()
+      set({ profile: profile as DbProfile | null })
+    } catch {
+      set({ loading: false })
+    }
   },
 }))

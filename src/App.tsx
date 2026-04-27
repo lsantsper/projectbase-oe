@@ -15,16 +15,26 @@ import AuthCallback from '@/pages/AuthCallback'
 
 export default function App() {
   useEffect(() => {
+    // 1. Explicit session check on mount — reliable, doesn't wait for onAuthStateChange
+    useAuthStore.getState().initialize().then(() => {
+      const user = useAuthStore.getState().user
+      if (user) useAppStore.getState().loadProjects()
+    })
+
+    // 2. Watch for subsequent auth events (SIGNED_IN, SIGNED_OUT, TOKEN_REFRESHED)
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      // Skip INITIAL_SESSION — already handled by initialize() above
+      if (event === 'INITIAL_SESSION') return
+
       if (session?.user) {
         useAuthStore.getState().loadProfile().then(() => {
           useAppStore.getState().loadProjects()
         })
       } else {
-        useAuthStore.getState().setUser(null)
-        useAuthStore.setState({ loading: false })
+        useAuthStore.setState({ user: null, profile: null, loading: false })
       }
     })
+
     return () => subscription.unsubscribe()
   }, [])
 

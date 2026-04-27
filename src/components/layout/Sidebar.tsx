@@ -1,6 +1,8 @@
+import { useState, useEffect, useRef } from 'react'
 import { NavLink, useNavigate, useMatch } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useAppStore } from '@/store/useAppStore'
+import { useAuthStore } from '@/stores/useAuthStore'
 import { Project } from '@/types'
 
 const PALETTE = ['#F59E0B','#10B981','#3B82F6','#8B5CF6','#EC4899','#EF4444','#06B6D4','#84CC16']
@@ -10,15 +12,37 @@ function projectColor(project: Project, index: number): string {
   return PALETTE[index % PALETTE.length]
 }
 
+function getInitials(name: string): string {
+  return name.split(' ').map(w => w[0]).filter(Boolean).slice(0, 2).join('').toUpperCase() || 'U'
+}
+
 export function Sidebar() {
   const { t } = useTranslation()
   const { settings, updateSettings, projects } = useAppStore()
+  const { user, profile, signOut } = useAuthStore()
   const navigate = useNavigate()
   const projectMatch = useMatch('/projects/:id')
   const activeProjectId = projectMatch?.params.id
   const collapsed = settings.sidebarCollapsed ?? false
+  const [showUserMenu, setShowUserMenu] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
 
   function toggle() { updateSettings({ sidebarCollapsed: !collapsed }) }
+
+  const displayName = profile?.name ?? user?.email ?? 'Usuário'
+  const avatarUrl = profile?.avatar_url ?? null
+  const initials = getInitials(displayName)
+
+  useEffect(() => {
+    if (!showUserMenu) return
+    function handler(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setShowUserMenu(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showUserMenu])
 
   const sidebarW = collapsed ? 48 : 220
 
@@ -125,29 +149,85 @@ export function Sidebar() {
         })}
       </div>
 
-      {/* Footer */}
+      {/* Footer — user avatar + sign out */}
       <div
-        className="flex items-center gap-2.5 shrink-0 px-3 py-3"
-        style={{ borderTop: '0.5px solid var(--sidebar-border)' }}
+        ref={menuRef}
+        style={{ borderTop: '0.5px solid var(--sidebar-border)', position: 'relative' }}
       >
-        <span style={{
-          background: 'var(--oe-primary)',
-          borderRadius: 'var(--radius-pill)',
-          color: 'white',
-          fontSize: 10,
-          fontWeight: 500,
-          width: 26,
-          height: 26,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          flexShrink: 0,
-        }}>OE</span>
-        {!collapsed && (
-          <span className="truncate text-[12px]" style={{ color: 'var(--sidebar-text)' }}>
-            ProjectBase OE
-          </span>
+        {/* Sign out popover */}
+        {showUserMenu && (
+          <div style={{
+            position: 'absolute',
+            bottom: '100%',
+            left: collapsed ? 4 : 8,
+            right: collapsed ? 4 : 8,
+            marginBottom: 4,
+            background: 'var(--surface-card)',
+            border: '0.5px solid var(--border-default)',
+            borderRadius: 'var(--radius-md)',
+            overflow: 'hidden',
+            zIndex: 100,
+          }}>
+            {!collapsed && (
+              <div style={{ padding: '8px 12px 6px', borderBottom: '0.5px solid var(--border-default)' }}>
+                <p style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)', truncate: true } as any}>{displayName}</p>
+                <p style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 1 }}>{user?.email}</p>
+              </div>
+            )}
+            <button
+              onClick={() => { setShowUserMenu(false); signOut() }}
+              style={{
+                width: '100%',
+                padding: '8px 12px',
+                textAlign: 'left',
+                fontSize: 13,
+                color: 'var(--color-danger-text)',
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--surface-subtle)')}
+              onMouseLeave={e => (e.currentTarget.style.background = '')}
+            >
+              Sair
+            </button>
+          </div>
         )}
+
+        <button
+          onClick={() => setShowUserMenu(v => !v)}
+          className="flex items-center gap-2.5 w-full shrink-0 px-3 py-3"
+          style={{ background: 'none', border: 'none', cursor: 'pointer' }}
+          title={collapsed ? displayName : undefined}
+        >
+          {/* Avatar */}
+          {avatarUrl ? (
+            <img
+              src={avatarUrl}
+              alt={displayName}
+              style={{ width: 26, height: 26, borderRadius: '50%', flexShrink: 0, objectFit: 'cover' }}
+            />
+          ) : (
+            <span style={{
+              background: 'var(--oe-primary)',
+              borderRadius: '50%',
+              color: 'white',
+              fontSize: 10,
+              fontWeight: 600,
+              width: 26,
+              height: 26,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              flexShrink: 0,
+            }}>{initials}</span>
+          )}
+          {!collapsed && (
+            <span className="truncate text-[12px]" style={{ color: 'var(--sidebar-text)' }}>
+              {displayName}
+            </span>
+          )}
+        </button>
       </div>
     </aside>
   )

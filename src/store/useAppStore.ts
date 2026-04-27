@@ -11,6 +11,17 @@ import { applyIsCritical } from '@/utils/criticalPath'
 import { workdaysBetween, parseHolidays } from '@/utils/businessDays'
 import { applyAutoStatus } from '@/utils/statusCalc'
 import { parseISO } from 'date-fns'
+import { supabase } from '@/lib/supabase'
+import { useAuthStore } from '@/stores/useAuthStore'
+import { useToastStore } from '@/stores/useToastStore'
+import {
+  dbProjectToStore,
+  storeProjectToDb,
+  storeEntryToDb,
+  storeRiskToDb,
+  storeDelayLogToDb,
+} from '@/utils/dbConversions'
+import type { DbProjectFull } from '@/types/database'
 
 const TEMPLATES_VERSION = 2
 
@@ -94,7 +105,16 @@ const DEFAULT_TEMPLATES: ProjectTemplate[] = [
 
 interface AppStore {
   projects: Project[]
+  projectsLoading: boolean
+  archivedProjects: Project[]
+  archivedProjectsLoaded: boolean
   settings: AppSettings
+
+  // Load / archive
+  loadProjects: () => Promise<void>
+  loadArchivedProjects: () => Promise<void>
+  archiveProject: (id: string) => Promise<void>
+  unarchiveProject: (id: string) => Promise<void>
 
   // Projects
   createProject: (data: Omit<Project, 'id' | 'phases' | 'risks' | 'delayLog' | 'team' | 'links' | 'status'>) => string
@@ -176,7 +196,7 @@ interface AppStore {
   removeClient: (name: string) => void
 }
 
-// ─── helpers ─────────────────────────────────────────────────────────────────
+// ─── local helpers ────────────────────────────────────────────────────────────
 
 function mutateProject(projects: Project[], id: string, fn: (p: Project) => Project): Project[] {
   return projects.map((p) => (p.id === id ? fn(p) : p))
@@ -196,12 +216,87 @@ function refreshCriticalPath(project: Project): Project {
   return { ...project, phases: applyIsCritical(project.phases) }
 }
 
+// ─── DB sync helpers ──────────────────────────────────────────────────────────
+
+function getUserId(): string {
+  const { user } = useAuthStore.getState()
+  if (!user?.id) throw new Error('Usuário não autenticado')
+  return user.id
+}
+
+function sync(fn: () => Promise<void>): void {
+  fn().catch((err) => {
+    useToastStore.getState().addToast(
+      err instanceof Error ? err.message : 'Erro ao salvar'
+    )
+  })
+}
+
+async function dbSyncProjectRow(project: Project, userId: string): Promise<void> {
+  const flat = storeProjectToDb(project, userId)
+  const { created_at, created_by, ...updateFields } = flat.project
+  const { error } = await supabase
+    .from('projects')
+    .update({ ...updateFields, updated_at: new Date().toISOString(), updated_by: userId })
+    .eq('id', project.id)
+  if (error) throw new Error(error.message)
+}
+
+async function dbSyncEntry(project: Project, entryId: string, userId: string): Promise<void> {
+  for (const phase of project.phases) {
+    const entry = phase.entries.find((e) => e.id === entryId)
+    if (entry) {
+      const row = storeEntryToDb(entry, phase.id, project.id, userId)
+      const { created_at, created_by, ...updateFields } = row
+      const { error } = await supabase
+        .from('entries')
+        .update({ ...updateFields, updated_at: new Date().toISOString() })
+        .eq('id', entryId)
+      if (error) throw new Error(error.message)
+      return
+    }
+    const parentEntry = phase.entries.find((e) => e.subtasks.some((s) => s.id === entryId))
+    if (parentEntry) {
+      const row = storeEntryToDb(parentEntry, phase.id, project.id, userId)
+      const { created_at, created_by, ...updateFields } = row
+      const { error } = await supabase
+        .from('entries')
+        .update({ ...updateFields, updated_at: new Date().toISOString() })
+        .eq('id', parentEntry.id)
+      if (error) throw new Error(error.message)
+      return
+    }
+  }
+}
+
+async function dbSyncAllEntries(project: Project, userId: string): Promise<void> {
+  const rows = project.phases.flatMap((ph) =>
+    ph.entries.map((e) => storeEntryToDb(e, ph.id, project.id, userId))
+  )
+  if (!rows.length) return
+  const { error } = await supabase.from('entries').upsert(rows)
+  if (error) throw new Error(error.message)
+}
+
+async function dbSyncRisk(projectId: string, risk: Risk, userId: string): Promise<void> {
+  const row = storeRiskToDb(risk, projectId, userId)
+  const { created_at, created_by, ...updateFields } = row
+  const { error } = await supabase
+    .from('risks')
+    .update({ ...updateFields, updated_at: new Date().toISOString() })
+    .eq('id', risk.id)
+  if (error) throw new Error(error.message)
+}
+
 // ─── store ───────────────────────────────────────────────────────────────────
 
 export const useAppStore = create<AppStore>()(
   persist(
     (set, get) => ({
       projects: [],
+      projectsLoading: false,
+      archivedProjects: [],
+      archivedProjectsLoaded: false,
       settings: {
         holidays: [],
         holidayNames: {},
@@ -210,6 +305,128 @@ export const useAppStore = create<AppStore>()(
         dateFormat: 'DD/MM/YYYY',
         workdays: 'mon-fri',
         clients: [],
+      },
+
+      // ── Load / Archive ────────────────────────────────────────────────────
+
+      async loadProjects() {
+        set({ projectsLoading: true })
+        try {
+          const { data: projectRows, error: projError } = await supabase
+            .from('projects')
+            .select('*')
+            .eq('archived', false)
+            .order('created_at')
+
+          if (projError) throw new Error(projError.message)
+          if (!projectRows?.length) {
+            set({ projects: [], projectsLoading: false })
+            return
+          }
+
+          const ids = projectRows.map((p) => p.id)
+
+          const [phasesRes, entriesRes, commentsRes, risksRes, delayRes] = await Promise.all([
+            supabase.from('phases').select('*').in('project_id', ids),
+            supabase.from('entries').select('*').in('project_id', ids),
+            supabase.from('comments').select('*').in('project_id', ids),
+            supabase.from('risks').select('*').in('project_id', ids),
+            supabase.from('delay_log').select('*').in('project_id', ids),
+          ])
+
+          const phases = phasesRes.data ?? []
+          const entries = entriesRes.data ?? []
+          const comments = commentsRes.data ?? []
+          const risks = risksRes.data ?? []
+          const delay_log = delayRes.data ?? []
+
+          const projects = projectRows.map((project) =>
+            dbProjectToStore({
+              project,
+              phases: phases.filter((ph) => ph.project_id === project.id),
+              entries: entries.filter((e) => e.project_id === project.id),
+              comments: comments.filter((c) => c.project_id === project.id),
+              delay_log: delay_log.filter((d) => d.project_id === project.id),
+              risks: risks.filter((r) => r.project_id === project.id),
+            } as DbProjectFull)
+          )
+
+          set({ projects, projectsLoading: false })
+        } catch (err) {
+          useToastStore.getState().addToast(
+            err instanceof Error ? err.message : 'Erro ao carregar projetos'
+          )
+          set({ projectsLoading: false })
+        }
+      },
+
+      async archiveProject(id) {
+        const project = get().projects.find((p) => p.id === id)
+        set((s) => ({
+          projects: s.projects.filter((p) => p.id !== id),
+          archivedProjects: project
+            ? [...s.archivedProjects, { ...project, archived: true }]
+            : s.archivedProjects,
+        }))
+        const { error } = await supabase
+          .from('projects')
+          .update({ archived: true, updated_at: new Date().toISOString() })
+          .eq('id', id)
+        if (error) useToastStore.getState().addToast(error.message)
+      },
+
+      async loadArchivedProjects() {
+        set({ archivedProjectsLoaded: false })
+        try {
+          const { data: projectRows, error } = await supabase
+            .from('projects')
+            .select('*')
+            .eq('archived', true)
+            .order('updated_at', { ascending: false })
+          if (error) throw new Error(error.message)
+          if (!projectRows?.length) {
+            set({ archivedProjects: [], archivedProjectsLoaded: true })
+            return
+          }
+          const ids = projectRows.map((p) => p.id)
+          const [phasesRes, entriesRes, commentsRes, risksRes, delayRes] = await Promise.all([
+            supabase.from('phases').select('*').in('project_id', ids),
+            supabase.from('entries').select('*').in('project_id', ids),
+            supabase.from('comments').select('*').in('project_id', ids),
+            supabase.from('risks').select('*').in('project_id', ids),
+            supabase.from('delay_log').select('*').in('project_id', ids),
+          ])
+          const archivedProjects = projectRows.map((project) =>
+            dbProjectToStore({
+              project,
+              phases: (phasesRes.data ?? []).filter((ph) => ph.project_id === project.id),
+              entries: (entriesRes.data ?? []).filter((e) => e.project_id === project.id),
+              comments: (commentsRes.data ?? []).filter((c) => c.project_id === project.id),
+              delay_log: (delayRes.data ?? []).filter((d) => d.project_id === project.id),
+              risks: (risksRes.data ?? []).filter((r) => r.project_id === project.id),
+            } as DbProjectFull)
+          )
+          set({ archivedProjects, archivedProjectsLoaded: true })
+        } catch (err) {
+          useToastStore.getState().addToast(err instanceof Error ? err.message : 'Erro ao carregar projetos arquivados')
+          set({ archivedProjectsLoaded: true })
+        }
+      },
+
+      async unarchiveProject(id) {
+        const project = get().archivedProjects.find((p) => p.id === id)
+        if (!project) return
+        const palette = ['#F59E0B','#10B981','#3B82F6','#8B5CF6','#EC4899','#EF4444','#06B6D4','#84CC16']
+        const color = palette[get().projects.length % palette.length]
+        set((s) => ({
+          archivedProjects: s.archivedProjects.filter((p) => p.id !== id),
+          projects: [...s.projects, { ...project, archived: false, color }],
+        }))
+        const { error } = await supabase
+          .from('projects')
+          .update({ archived: false, updated_at: new Date().toISOString() })
+          .eq('id', id)
+        if (error) useToastStore.getState().addToast(error.message)
       },
 
       // ── Projects ──────────────────────────────────────────────────────────
@@ -223,9 +440,7 @@ export const useAppStore = create<AppStore>()(
         let phases: Phase[] = []
 
         if (template) {
-          // Build phases from template with sequential dates starting today
-          let cursor = today
-          const idMap = new Map<string, string>() // templateEntryId → newEntryId
+          const idMap = new Map<string, string>()
 
           phases = template.phases.map((tp) => {
             const entries: Entry[] = tp.entries.map((te) => {
@@ -236,11 +451,11 @@ export const useAppStore = create<AppStore>()(
                 type: te.type,
                 name: te.nameKey ? i18n.t(te.nameKey, { lng: data.language }) : te.name,
                 responsible: te.responsible,
-                dependsOn: [], // will be remapped below
+                dependsOn: [],
                 isCritical: false,
-                plannedStart: te.type === 'task' ? cursor : undefined,
-                plannedEnd: te.type === 'task' ? cursor : undefined,
-                plannedDate: te.type !== 'task' ? cursor : undefined,
+                plannedStart: te.type === 'task' ? today : undefined,
+                plannedEnd: te.type === 'task' ? today : undefined,
+                plannedDate: te.type !== 'task' ? today : undefined,
                 durationDays: te.durationDays,
                 durationHours: te.durationHours,
                 riskFlag: 'none',
@@ -254,11 +469,9 @@ export const useAppStore = create<AppStore>()(
             return { id: uuid(), name: tp.nameKey ? i18n.t(tp.nameKey, { lng: data.language }) : tp.name, order: tp.order, entries }
           })
 
-          // Remap dependsOn IDs using idMap built during entry creation
           const allTemplateEntries = template.phases.flatMap((p) => p.entries)
           for (const phase of phases) {
             for (const entry of phase.entries) {
-              // Find the original template entry by matching the new entry id via idMap
               const templateEntryId = [...idMap.entries()].find(([, newId]) => newId === entry.id)?.[0]
               const te = allTemplateEntries.find((e) => e.id === templateEntryId)
               if (te) {
@@ -267,17 +480,6 @@ export const useAppStore = create<AppStore>()(
             }
           }
 
-          // Run cascade from beginning
-          const tempProject: Project = {
-            ...data,
-            id,
-            phases,
-            risks: [],
-            delayLog: [],
-            team: [],
-            links: [],
-            status: 'planning',
-          }
           phases = applyIsCritical(phases)
         }
 
@@ -297,6 +499,22 @@ export const useAppStore = create<AppStore>()(
         }
 
         set((s) => ({ projects: [...s.projects, project] }))
+
+        sync(async () => {
+          const userId = getUserId()
+          const flat = storeProjectToDb(project, userId)
+          const { error: pe } = await supabase.from('projects').insert(flat.project)
+          if (pe) throw new Error(pe.message)
+          if (flat.phases.length) {
+            const { error: phe } = await supabase.from('phases').insert(flat.phases)
+            if (phe) throw new Error(phe.message)
+          }
+          if (flat.entries.length) {
+            const { error: ee } = await supabase.from('entries').insert(flat.entries)
+            if (ee) throw new Error(ee.message)
+          }
+        })
+
         return id
       },
 
@@ -304,28 +522,58 @@ export const useAppStore = create<AppStore>()(
         set((s) => ({
           projects: mutateProject(s.projects, id, (p) => ({ ...p, ...patch })),
         }))
+        sync(async () => {
+          const project = get().projects.find((p) => p.id === id)
+          if (!project) return
+          await dbSyncProjectRow(project, getUserId())
+        })
       },
 
       deleteProject(id) {
         set((s) => ({ projects: s.projects.filter((p) => p.id !== id) }))
+        sync(async () => {
+          const { error } = await supabase.from('projects').delete().eq('id', id)
+          if (error) throw new Error(error.message)
+        })
       },
 
       importProject(project) {
         set((s) => ({ projects: [...s.projects, project] }))
+        sync(async () => {
+          const userId = getUserId()
+          const flat = storeProjectToDb(project, userId)
+          await supabase.from('projects').upsert(flat.project)
+          if (flat.phases.length) await supabase.from('phases').upsert(flat.phases)
+          if (flat.entries.length) await supabase.from('entries').upsert(flat.entries)
+          if (flat.risks.length) await supabase.from('risks').upsert(flat.risks)
+          if (flat.delay_log.length) await supabase.from('delay_log').upsert(flat.delay_log)
+          if (flat.comments.length) await supabase.from('comments').upsert(flat.comments)
+        })
       },
 
       // ── Phases ────────────────────────────────────────────────────────────
 
       addPhase(projectId, name) {
+        const phaseId = uuid()
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
             phases: [
               ...p.phases,
-              { id: uuid(), name, order: p.phases.length, entries: [] },
+              { id: phaseId, name, order: p.phases.length, entries: [] },
             ],
           })),
         }))
+        sync(async () => {
+          const { error } = await supabase.from('phases').insert({
+            id: phaseId,
+            project_id: projectId,
+            name,
+            order: get().projects.find((p) => p.id === projectId)?.phases.length ?? 0,
+            created_at: new Date().toISOString(),
+          })
+          if (error) throw new Error(error.message)
+        })
       },
 
       updatePhase(projectId, phaseId, patch) {
@@ -335,6 +583,15 @@ export const useAppStore = create<AppStore>()(
             phases: p.phases.map((ph) => (ph.id === phaseId ? { ...ph, ...patch } : ph)),
           })),
         }))
+        sync(async () => {
+          const phase = get().projects.find((p) => p.id === projectId)?.phases.find((ph) => ph.id === phaseId)
+          if (!phase) return
+          const { error } = await supabase
+            .from('phases')
+            .update({ name: phase.name, order: phase.order })
+            .eq('id', phaseId)
+          if (error) throw new Error(error.message)
+        })
       },
 
       deletePhase(projectId, phaseId) {
@@ -344,17 +601,30 @@ export const useAppStore = create<AppStore>()(
             phases: p.phases.filter((ph) => ph.id !== phaseId),
           })),
         }))
+        sync(async () => {
+          await supabase.from('entries').delete().eq('phase_id', phaseId)
+          const { error } = await supabase.from('phases').delete().eq('id', phaseId)
+          if (error) throw new Error(error.message)
+        })
       },
 
       reorderPhases(projectId, phases) {
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({ ...p, phases })),
         }))
+        sync(async () => {
+          await Promise.all(
+            phases.map((ph) =>
+              supabase.from('phases').update({ order: ph.order }).eq('id', ph.id)
+            )
+          )
+        })
       },
 
       // ── Entries ───────────────────────────────────────────────────────────
 
       addEntry(projectId, phaseId, entryData) {
+        const entryId = uuid()
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) =>
             refreshCriticalPath({
@@ -368,7 +638,7 @@ export const useAppStore = create<AppStore>()(
                         ...ph.entries,
                         {
                           ...entryData,
-                          id: uuid(),
+                          id: entryId,
                           isCritical: false,
                           subtasks: [],
                           comments: [],
@@ -380,9 +650,19 @@ export const useAppStore = create<AppStore>()(
             }),
           ),
         }))
+        sync(async () => {
+          const userId = getUserId()
+          const project = get().projects.find((p) => p.id === projectId)
+          const phase = project?.phases.find((ph) => ph.id === phaseId)
+          const entry = phase?.entries.find((e) => e.id === entryId)
+          if (!entry || !phase || !project) return
+          const { error } = await supabase.from('entries').insert(storeEntryToDb(entry, phaseId, projectId, userId))
+          if (error) throw new Error(error.message)
+        })
       },
 
       addSubtask(projectId, phaseId, parentId, entryData) {
+        const subtaskId = uuid()
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) =>
             refreshCriticalPath({
@@ -401,7 +681,7 @@ export const useAppStore = create<AppStore>()(
                                 ...e.subtasks,
                                 {
                                   ...entryData,
-                                  id: uuid(),
+                                  id: subtaskId,
                                   isCritical: false,
                                   subtasks: [],
                                   comments: [],
@@ -415,6 +695,20 @@ export const useAppStore = create<AppStore>()(
             }),
           ),
         }))
+        sync(async () => {
+          const userId = getUserId()
+          const project = get().projects.find((p) => p.id === projectId)
+          const phase = project?.phases.find((ph) => ph.id === phaseId)
+          const parentEntry = phase?.entries.find((e) => e.id === parentId)
+          if (!parentEntry || !phase || !project) return
+          const row = storeEntryToDb(parentEntry, phaseId, projectId, userId)
+          const { created_at, created_by, ...updateFields } = row
+          const { error } = await supabase
+            .from('entries')
+            .update({ ...updateFields, updated_at: new Date().toISOString() })
+            .eq('id', parentId)
+          if (error) throw new Error(error.message)
+        })
       },
 
       updateEntry(projectId, entryId, patch) {
@@ -434,6 +728,11 @@ export const useAppStore = create<AppStore>()(
             }),
           ),
         }))
+        sync(async () => {
+          const project = get().projects.find((p) => p.id === projectId)
+          if (!project) return
+          await dbSyncEntry(project, entryId, getUserId())
+        })
       },
 
       deleteEntry(projectId, phaseId, entryId) {
@@ -457,6 +756,22 @@ export const useAppStore = create<AppStore>()(
             }),
           ),
         }))
+        sync(async () => {
+          // Check if it was a top-level entry (already removed from state, so delete from DB)
+          // For subtasks, upsert the parent. We need to find the parent before state was updated.
+          // Since state already updated, just try deleting — if it's a subtask, DB row doesn't exist
+          // and the parent was already updated via storeEntryToDb in addSubtask flow.
+          // Simplest: attempt delete (no-op if subtask), and also upsert all entries to sync subtask removal.
+          const { error: delErr } = await supabase.from('entries').delete().eq('id', entryId)
+          // If no rows deleted, it was a subtask — upsert all entries to sync
+          if (!delErr) {
+            const project = get().projects.find((p) => p.id === projectId)
+            if (project) {
+              const userId = getUserId()
+              await dbSyncAllEntries(project, userId)
+            }
+          }
+        })
       },
 
       updateEntryStatus(projectId, entryId, status) {
@@ -479,6 +794,11 @@ export const useAppStore = create<AppStore>()(
             })),
           })),
         }))
+        sync(async () => {
+          const project = get().projects.find((p) => p.id === projectId)
+          if (!project) return
+          await dbSyncEntry(project, entryId, getUserId())
+        })
       },
 
       resetStatusOverride(projectId, entryId) {
@@ -499,6 +819,11 @@ export const useAppStore = create<AppStore>()(
             })),
           })),
         }))
+        sync(async () => {
+          const project = get().projects.find((p) => p.id === projectId)
+          if (!project) return
+          await dbSyncEntry(project, entryId, getUserId())
+        })
       },
 
       recalculateStatuses(projectId) {
@@ -515,6 +840,11 @@ export const useAppStore = create<AppStore>()(
             })),
           })),
         }))
+        sync(async () => {
+          const project = get().projects.find((p) => p.id === projectId)
+          if (!project) return
+          await dbSyncAllEntries(project, getUserId())
+        })
       },
 
       updateEntryRisk(projectId, entryId, flag) {
@@ -536,7 +866,6 @@ export const useAppStore = create<AppStore>()(
 
         const updatedEntry = findEntryDeep(newPhases, entryId)
 
-        // Calculate days shifted for delay log
         let daysDiff = 0
         if (prevEntry && updatedEntry && (field === 'plannedEnd' || field === 'plannedDate')) {
           const prevDate = field === 'plannedEnd' ? prevEntry.plannedEnd : prevEntry.plannedDate
@@ -547,10 +876,12 @@ export const useAppStore = create<AppStore>()(
         }
 
         const delayLog = [...project.delayLog]
+        let newDelayId: string | undefined
 
         if (justification && prevEntry && daysDiff !== 0 && Math.abs(daysDiff) > 0) {
+          newDelayId = uuid()
           delayLog.push({
-            id: uuid(),
+            id: newDelayId,
             date: new Date().toISOString().split('T')[0],
             entryId,
             entryName: prevEntry.name,
@@ -579,6 +910,20 @@ export const useAppStore = create<AppStore>()(
             delayLog,
           })),
         }))
+
+        sync(async () => {
+          const userId = getUserId()
+          const updated = get().projects.find((p) => p.id === projectId)
+          if (!updated) return
+          await dbSyncAllEntries(updated, userId)
+          if (newDelayId) {
+            const delayEntry = updated.delayLog.find((d) => d.id === newDelayId)
+            if (delayEntry) {
+              const { error } = await supabase.from('delay_log').insert(storeDelayLogToDb(delayEntry, projectId, userId))
+              if (error) throw new Error(error.message)
+            }
+          }
+        })
       },
 
       // ── Baseline ──────────────────────────────────────────────────────────
@@ -605,6 +950,13 @@ export const useAppStore = create<AppStore>()(
             })),
           })),
         }))
+        sync(async () => {
+          const userId = getUserId()
+          const project = get().projects.find((p) => p.id === projectId)
+          if (!project) return
+          await dbSyncProjectRow(project, userId)
+          await dbSyncAllEntries(project, userId)
+        })
       },
 
       clearBaseline(projectId) {
@@ -629,17 +981,31 @@ export const useAppStore = create<AppStore>()(
             })),
           })),
         }))
+        sync(async () => {
+          const userId = getUserId()
+          const project = get().projects.find((p) => p.id === projectId)
+          if (!project) return
+          await dbSyncProjectRow(project, userId)
+          await dbSyncAllEntries(project, userId)
+        })
       },
 
       // ── Risks ─────────────────────────────────────────────────────────────
 
       addRisk(projectId, risk) {
+        const id = uuid()
+        const newRisk: Risk = { ...risk, id }
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
-            risks: [...p.risks, { ...risk, id: uuid() }],
+            risks: [...p.risks, newRisk],
           })),
         }))
+        sync(async () => {
+          const userId = getUserId()
+          const { error } = await supabase.from('risks').insert(storeRiskToDb(newRisk, projectId, userId))
+          if (error) throw new Error(error.message)
+        })
       },
 
       updateRisk(projectId, riskId, patch) {
@@ -649,6 +1015,12 @@ export const useAppStore = create<AppStore>()(
             risks: p.risks.map((r) => (r.id === riskId ? { ...r, ...patch } : r)),
           })),
         }))
+        sync(async () => {
+          const project = get().projects.find((p) => p.id === projectId)
+          const risk = project?.risks.find((r) => r.id === riskId)
+          if (!risk) return
+          await dbSyncRisk(projectId, risk, getUserId())
+        })
       },
 
       deleteRisk(projectId, riskId) {
@@ -658,15 +1030,26 @@ export const useAppStore = create<AppStore>()(
             risks: p.risks.filter((r) => r.id !== riskId),
           })),
         }))
+        sync(async () => {
+          const { error } = await supabase.from('risks').delete().eq('id', riskId)
+          if (error) throw new Error(error.message)
+        })
       },
 
       addActionTask(projectId, riskId, task) {
+        const id = uuid()
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
-            risks: p.risks.map((r) => r.id === riskId ? { ...r, actionTasks: [...r.actionTasks, { ...task, id: uuid() }] } : r),
+            risks: p.risks.map((r) => r.id === riskId ? { ...r, actionTasks: [...r.actionTasks, { ...task, id }] } : r),
           })),
         }))
+        sync(async () => {
+          const project = get().projects.find((p) => p.id === projectId)
+          const risk = project?.risks.find((r) => r.id === riskId)
+          if (!risk) return
+          await dbSyncRisk(projectId, risk, getUserId())
+        })
       },
 
       updateActionTask(projectId, riskId, taskId, patch) {
@@ -676,6 +1059,12 @@ export const useAppStore = create<AppStore>()(
             risks: p.risks.map((r) => r.id === riskId ? { ...r, actionTasks: r.actionTasks.map((t) => t.id === taskId ? { ...t, ...patch } : t) } : r),
           })),
         }))
+        sync(async () => {
+          const project = get().projects.find((p) => p.id === projectId)
+          const risk = project?.risks.find((r) => r.id === riskId)
+          if (!risk) return
+          await dbSyncRisk(projectId, risk, getUserId())
+        })
       },
 
       toggleActionTask(projectId, riskId, taskId) {
@@ -685,6 +1074,12 @@ export const useAppStore = create<AppStore>()(
             risks: p.risks.map((r) => r.id === riskId ? { ...r, actionTasks: r.actionTasks.map((t) => t.id === taskId ? { ...t, done: !t.done } : t) } : r),
           })),
         }))
+        sync(async () => {
+          const project = get().projects.find((p) => p.id === projectId)
+          const risk = project?.risks.find((r) => r.id === riskId)
+          if (!risk) return
+          await dbSyncRisk(projectId, risk, getUserId())
+        })
       },
 
       deleteActionTask(projectId, riskId, taskId) {
@@ -694,15 +1089,28 @@ export const useAppStore = create<AppStore>()(
             risks: p.risks.map((r) => r.id === riskId ? { ...r, actionTasks: r.actionTasks.filter((t) => t.id !== taskId) } : r),
           })),
         }))
+        sync(async () => {
+          const project = get().projects.find((p) => p.id === projectId)
+          const risk = project?.risks.find((r) => r.id === riskId)
+          if (!risk) return
+          await dbSyncRisk(projectId, risk, getUserId())
+        })
       },
 
       addDelayLogEntry(projectId, entry) {
+        const id = uuid()
+        const newEntry: DelayLogEntry = { ...entry, id }
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
-            delayLog: [...p.delayLog, { ...entry, id: uuid() }],
+            delayLog: [...p.delayLog, newEntry],
           })),
         }))
+        sync(async () => {
+          const userId = getUserId()
+          const { error } = await supabase.from('delay_log').insert(storeDelayLogToDb(newEntry, projectId, userId))
+          if (error) throw new Error(error.message)
+        })
       },
 
       updateDelayLogEntry(projectId, entryId, patch) {
@@ -712,6 +1120,26 @@ export const useAppStore = create<AppStore>()(
             delayLog: p.delayLog.map((e) => e.id === entryId ? { ...e, ...patch } : e),
           })),
         }))
+        sync(async () => {
+          const project = get().projects.find((p) => p.id === projectId)
+          const entry = project?.delayLog.find((d) => d.id === entryId)
+          if (!entry) return
+          const userId = getUserId()
+          const row = storeDelayLogToDb(entry, projectId, userId)
+          const { error } = await supabase
+            .from('delay_log')
+            .update({
+              entry_id: row.entry_id,
+              entry_name: row.entry_name,
+              days: row.days,
+              description: row.description,
+              responsibility: row.responsibility,
+              type: row.type,
+              triggered_by: row.triggered_by,
+            })
+            .eq('id', entryId)
+          if (error) throw new Error(error.message)
+        })
       },
 
       deleteDelayLogEntry(projectId, entryId) {
@@ -721,6 +1149,10 @@ export const useAppStore = create<AppStore>()(
             delayLog: p.delayLog.filter((e) => e.id !== entryId),
           })),
         }))
+        sync(async () => {
+          const { error } = await supabase.from('delay_log').delete().eq('id', entryId)
+          if (error) throw new Error(error.message)
+        })
       },
 
       setColumnVisibility(projectId, visibility) {
@@ -730,17 +1162,24 @@ export const useAppStore = create<AppStore>()(
             columnVisibility: visibility,
           })),
         }))
+        // columnVisibility is not in DbProject — skip DB sync
       },
 
       // ── Team ──────────────────────────────────────────────────────────────
 
       addTeamMember(projectId, member) {
+        const id = uuid()
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
-            team: [...p.team, { ...member, id: uuid() }],
+            team: [...p.team, { ...member, id }],
           })),
         }))
+        sync(async () => {
+          const project = get().projects.find((p) => p.id === projectId)
+          if (!project) return
+          await dbSyncProjectRow(project, getUserId())
+        })
       },
 
       updateTeamMember(projectId, memberId, patch) {
@@ -750,6 +1189,11 @@ export const useAppStore = create<AppStore>()(
             team: p.team.map((m) => (m.id === memberId ? { ...m, ...patch } : m)),
           })),
         }))
+        sync(async () => {
+          const project = get().projects.find((p) => p.id === projectId)
+          if (!project) return
+          await dbSyncProjectRow(project, getUserId())
+        })
       },
 
       removeTeamMember(projectId, memberId) {
@@ -759,17 +1203,28 @@ export const useAppStore = create<AppStore>()(
             team: p.team.filter((m) => m.id !== memberId),
           })),
         }))
+        sync(async () => {
+          const project = get().projects.find((p) => p.id === projectId)
+          if (!project) return
+          await dbSyncProjectRow(project, getUserId())
+        })
       },
 
       // ── Project links ─────────────────────────────────────────────────────
 
       addProjectLink(projectId, link) {
+        const id = uuid()
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
-            links: [...p.links, { ...link, id: uuid() }],
+            links: [...p.links, { ...link, id }],
           })),
         }))
+        sync(async () => {
+          const project = get().projects.find((p) => p.id === projectId)
+          if (!project) return
+          await dbSyncProjectRow(project, getUserId())
+        })
       },
 
       removeProjectLink(projectId, linkId) {
@@ -779,25 +1234,36 @@ export const useAppStore = create<AppStore>()(
             links: p.links.filter((l) => l.id !== linkId),
           })),
         }))
+        sync(async () => {
+          const project = get().projects.find((p) => p.id === projectId)
+          if (!project) return
+          await dbSyncProjectRow(project, getUserId())
+        })
       },
 
       // ── Entry links ───────────────────────────────────────────────────────
 
       addEntryLink(projectId, entryId, link) {
+        const linkId = uuid()
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
             phases: p.phases.map((ph) => ({
               ...ph,
               entries: ph.entries.map((e) => {
-                if (e.id === entryId) return { ...e, links: [...e.links, { ...link, id: uuid() }] }
+                if (e.id === entryId) return { ...e, links: [...e.links, { ...link, id: linkId }] }
                 const hasSub = e.subtasks.some((sub) => sub.id === entryId)
                 if (!hasSub) return e
-                return { ...e, subtasks: e.subtasks.map((sub) => sub.id === entryId ? { ...sub, links: [...sub.links, { ...link, id: uuid() }] } : sub) }
+                return { ...e, subtasks: e.subtasks.map((sub) => sub.id === entryId ? { ...sub, links: [...sub.links, { ...link, id: linkId }] } : sub) }
               }),
             })),
           })),
         }))
+        sync(async () => {
+          const project = get().projects.find((p) => p.id === projectId)
+          if (!project) return
+          await dbSyncEntry(project, entryId, getUserId())
+        })
       },
 
       removeEntryLink(projectId, entryId, linkId) {
@@ -815,25 +1281,45 @@ export const useAppStore = create<AppStore>()(
             })),
           })),
         }))
+        sync(async () => {
+          const project = get().projects.find((p) => p.id === projectId)
+          if (!project) return
+          await dbSyncEntry(project, entryId, getUserId())
+        })
       },
 
       // ── Comments ──────────────────────────────────────────────────────────
 
       addComment(projectId, entryId, comment) {
+        const id = uuid()
+        const newComment: EntryComment = { ...comment, id }
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
             phases: p.phases.map((ph) => ({
               ...ph,
               entries: ph.entries.map((e) => {
-                if (e.id === entryId) return { ...e, comments: [...e.comments, { ...comment, id: uuid() }] }
+                if (e.id === entryId) return { ...e, comments: [...e.comments, newComment] }
                 const hasSub = e.subtasks.some((sub) => sub.id === entryId)
                 if (!hasSub) return e
-                return { ...e, subtasks: e.subtasks.map((sub) => sub.id === entryId ? { ...sub, comments: [...sub.comments, { ...comment, id: uuid() }] } : sub) }
+                return { ...e, subtasks: e.subtasks.map((sub) => sub.id === entryId ? { ...sub, comments: [...sub.comments, newComment] } : sub) }
               }),
             })),
           })),
         }))
+        sync(async () => {
+          const { error } = await supabase.from('comments').insert({
+            id,
+            project_id: projectId,
+            entry_id: entryId,
+            author_id: null,
+            author_name: newComment.author,
+            author_avatar: null,
+            text: newComment.text,
+            created_at: newComment.createdAt,
+          })
+          if (error) throw new Error(error.message)
+        })
       },
 
       removeComment(projectId, entryId, commentId) {
@@ -851,6 +1337,10 @@ export const useAppStore = create<AppStore>()(
             })),
           })),
         }))
+        sync(async () => {
+          const { error } = await supabase.from('comments').delete().eq('id', commentId)
+          if (error) throw new Error(error.message)
+        })
       },
 
       // ── Settings ──────────────────────────────────────────────────────────
@@ -913,14 +1403,14 @@ export const useAppStore = create<AppStore>()(
     }),
     {
       name: 'project-base-store',
-      // Deep-merge settings so new fields get their defaults when loading old persisted data.
-      // Templates are always reset to DEFAULT_TEMPLATES so code-level updates take effect immediately.
+      // Persist only settings — projects are loaded from Supabase
+      partialize: (state) => ({ settings: state.settings }),
       merge: (persisted, current) => {
-        const persistedSettings = ((persisted as Partial<typeof current>).settings ?? {}) as Partial<typeof current.settings>
+        const persistedObj = persisted as { settings?: Partial<AppSettings> }
+        const persistedSettings = persistedObj.settings ?? {}
         const shouldResetTemplates = (persistedSettings.templatesVersion ?? 0) < TEMPLATES_VERSION
         return {
           ...current,
-          ...(persisted as object),
           settings: {
             ...current.settings,
             ...persistedSettings,

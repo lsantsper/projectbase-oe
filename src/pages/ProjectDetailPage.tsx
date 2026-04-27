@@ -4,6 +4,7 @@ import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useAppStore } from '@/store/useAppStore'
 import { Button } from '@/components/ui/Button'
+import { Modal } from '@/components/ui/Modal'
 import StatusBadge from '@/components/StatusBadge'
 import { ProjectStatus, Project, Entry } from '@/types'
 import { generateStatusReport, ReportConfig } from '@/utils/statusReport'
@@ -91,7 +92,7 @@ function GhostBtn({ onClick, disabled, children }: { onClick: () => void; disabl
 
 // ─── MoreMenu ─────────────────────────────────────────────────────────────────
 
-function MoreMenu({ onImportUpdate }: { onImportUpdate: () => void }) {
+function MoreMenu({ onImportUpdate, onArchive }: { onImportUpdate: () => void; onArchive: () => void }) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
   const { triggerRef, popoverRef, position } = useSmartPosition(open)
@@ -133,7 +134,7 @@ function MoreMenu({ onImportUpdate }: { onImportUpdate: () => void }) {
       {open && createPortal(
         <div
           ref={popoverRef as any}
-          className="py-1 w-44"
+          className="py-1 w-48"
           style={{ position: 'fixed', ...position, zIndex: 1000, background: 'var(--surface-card)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)' }}
         >
           <button
@@ -147,6 +148,19 @@ function MoreMenu({ onImportUpdate }: { onImportUpdate: () => void }) {
               <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1M8 12l4-4m0 0l4 4m-4-4v12" />
             </svg>
             {t('import.importUpdate')}
+          </button>
+          <div style={{ height: '0.5px', background: 'var(--border-default)', margin: '2px 8px' }} />
+          <button
+            onClick={() => { setOpen(false); onArchive() }}
+            className="w-full flex items-center gap-2 px-3 py-2 text-left text-[12px] transition-colors"
+            style={{ color: 'var(--color-danger-text)' }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--surface-subtle)')}
+            onMouseLeave={e => (e.currentTarget.style.background = '')}
+          >
+            <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
+            </svg>
+            {t('project.archiveTitle')}
           </button>
         </div>,
         document.body,
@@ -162,7 +176,7 @@ export default function ProjectDetailPage() {
   const { t } = useTranslation()
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
-  const { projects, settings, updateProject } = useAppStore()
+  const { projects, settings, updateProject, archiveProject } = useAppStore()
   const initialTab = (TAB_IDS as readonly string[]).includes(searchParams.get('tab') ?? '')
     ? (searchParams.get('tab') as TabId)
     : 'overview'
@@ -171,6 +185,7 @@ export default function ProjectDetailPage() {
   const [exportingReport, setExportingReport] = useState(false)
   const [showReportModal, setShowReportModal] = useState(false)
   const [showImportModal, setShowImportModal] = useState(false)
+  const [showArchiveModal, setShowArchiveModal] = useState(false)
 
   const project = projects.find((p) => p.id === id)
 
@@ -278,7 +293,10 @@ export default function ProjectDetailPage() {
         )}
 
         {/* More options */}
-        <MoreMenu onImportUpdate={() => setShowImportModal(true)} />
+        <MoreMenu
+          onImportUpdate={() => setShowImportModal(true)}
+          onArchive={() => setShowArchiveModal(true)}
+        />
       </div>
 
       {/* ── Subheader chips ── */}
@@ -353,6 +371,34 @@ export default function ProjectDetailPage() {
           onClose={() => setShowImportModal(false)}
         />
       )}
+
+      <Modal
+        open={showArchiveModal}
+        title={t('project.archiveTitle')}
+        onClose={() => setShowArchiveModal(false)}
+        size="sm"
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setShowArchiveModal(false)}>
+              {t('actions.cancel')}
+            </Button>
+            <Button
+              onClick={async () => {
+                setShowArchiveModal(false)
+                await archiveProject(project.id)
+                navigate('/')
+              }}
+              style={{ background: 'var(--color-danger-text)', borderColor: 'var(--color-danger-text)' }}
+            >
+              {t('project.archive')}
+            </Button>
+          </>
+        }
+      >
+        <p style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+          {t('project.archiveMessage')}
+        </p>
+      </Modal>
     </div>
   )
 }

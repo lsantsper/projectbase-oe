@@ -180,14 +180,22 @@ function ListView({ projects, holidays, onOpen }: ListViewProps) {
           {projects.map((p) => {
             const dur = projectDurationDays(p, holidays)
             const variance = projectEndVariance(p, holidays)
+            const isArchived = !!p.archived
             return (
               <tr
                 key={p.id}
-                onClick={() => onOpen(p.id)}
-                className="hover:bg-[var(--surface-subtle)] cursor-pointer transition-colors"
+                onClick={() => !isArchived && onOpen(p.id)}
+                className={`transition-colors ${isArchived ? 'opacity-60 cursor-default' : 'hover:bg-[var(--surface-subtle)] cursor-pointer'}`}
               >
                 <td className="px-4 py-3">
-                  <p className="font-medium text-[var(--text-primary)]">{p.name}</p>
+                  <div className="flex items-center gap-2">
+                    <p className="font-medium text-[var(--text-primary)]">{p.name}</p>
+                    {isArchived && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium" style={{ background: 'var(--surface-subtle)', color: 'var(--text-tertiary)', border: '0.5px solid var(--border-default)' }}>
+                        {t('project.archived')}
+                      </span>
+                    )}
+                  </div>
                 </td>
                 <td className="px-4 py-3 text-[var(--text-secondary)]">{p.client}</td>
                 <td className="px-4 py-3 text-[var(--text-secondary)]">{p.pm}</td>
@@ -563,7 +571,7 @@ function NewProjectModal({ open, onClose, clients, members, templates, onCreate 
 export default function ProjectsPage() {
   const { t } = useTranslation()
   const navigate = useNavigate()
-  const { projects, settings, createProject } = useAppStore()
+  const { projects, settings, createProject, archivedProjects, archivedProjectsLoaded, loadArchivedProjects } = useAppStore()
 
   const [view, setView] = useState<'list' | 'kanban'>(() =>
     (localStorage.getItem('pb-portfolio-view') as 'list' | 'kanban') ?? 'list',
@@ -571,6 +579,7 @@ export default function ProjectsPage() {
   const [filters, setFilters] = useState<Filters>({ client: '', pm: '', type: '', dev: '' })
   const [modalOpen, setModalOpen] = useState(false)
   const [showImportModal, setShowImportModal] = useState(false)
+  const [showArchived, setShowArchived] = useState(false)
 
   useEffect(() => { localStorage.setItem('pb-portfolio-view', view) }, [view])
 
@@ -581,6 +590,11 @@ export default function ProjectsPage() {
   const pms = useMemo(() => uniquePMs(projects), [projects])
   const members = useMemo(() => uniqueMembers(projects), [projects])
   const filtered = useMemo(() => applyFilters(projects, filters), [projects, filters])
+
+  function handleToggleArchived() {
+    if (!showArchived && !archivedProjectsLoaded) loadArchivedProjects()
+    setShowArchived(v => !v)
+  }
 
   function handleCreate(data: Parameters<typeof createProject>[0]) {
     const id = createProject(data)
@@ -642,7 +656,26 @@ export default function ProjectsPage() {
           <Button onClick={() => setModalOpen(true)}>{t('project.createFirst')}</Button>
         </div>
       ) : view === 'list' ? (
-        <ListView projects={filtered} holidays={settings.holidays} onOpen={(id) => navigate(`/projects/${id}`)} />
+        <>
+          <ListView
+            projects={showArchived ? [...filtered, ...archivedProjects] : filtered}
+            holidays={settings.holidays}
+            onOpen={(id) => navigate(`/projects/${id}`)}
+          />
+          <div className="mt-3 flex justify-center">
+            <button
+              onClick={handleToggleArchived}
+              className="text-xs transition-colors"
+              style={{ color: 'var(--text-tertiary)' }}
+              onMouseEnter={e => (e.currentTarget.style.color = 'var(--text-secondary)')}
+              onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-tertiary)')}
+            >
+              {showArchived
+                ? t('project.hideArchived')
+                : t('project.showArchived', { n: archivedProjectsLoaded ? archivedProjects.length : '…' })}
+            </button>
+          </div>
+        </>
       ) : (
         <KanbanView projects={filtered} holidays={settings.holidays} onOpen={(id) => navigate(`/projects/${id}`)} />
       )}

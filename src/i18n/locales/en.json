@@ -61,7 +61,20 @@
     "devLeadPlaceholder": "Dev Lead name",
     "devSubtitle": "Integration or custom application",
     "templateStep": "1. Choose template",
-    "detailsStep": "2. Details"
+    "detailsStep": "2. Details",
+    "archiveTitle": "Archive project",
+    "archiveMessage": "The project will be hidden from the portfolio. You can unarchive it at any time in Settings.",
+    "archive": "Archive",
+    "unarchive": "Unarchive",
+    "archived": "Archived",
+    "showArchived": "Show archived ({{n}})",
+    "hideArchived": "Hide archived"
+  },
+  "audit": {
+    "createdBy": "Created by",
+    "by": "by",
+    "at": "on",
+    "updatedAt": "Last edited"
   },
   "portfolio": {
     "colProject": "Project",

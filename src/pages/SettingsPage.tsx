@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useAppStore } from '@/store/useAppStore'
@@ -46,7 +46,12 @@ function ToggleGroup<T extends string>({
 export default function SettingsPage() {
   const { t, i18n } = useTranslation()
   const navigate = useNavigate()
-  const { settings, updateSettings, addHoliday, removeHoliday, addClient, removeClient, projects } = useAppStore()
+  const {
+    settings, updateSettings, addHoliday, removeHoliday, addClient, removeClient, projects,
+    archivedProjects, archivedProjectsLoaded, loadArchivedProjects, unarchiveProject,
+  } = useAppStore()
+
+  useEffect(() => { loadArchivedProjects() }, [])
 
   const [holidayDate, setHolidayDate] = useState('')
   const [holidayName, setHolidayName] = useState('')
@@ -223,6 +228,33 @@ export default function SettingsPage() {
             </div>
           ))}
         </div>
+      </Section>
+
+      {/* Archived projects */}
+      <Section title="Projetos arquivados" description="Projetos ocultos do portfólio. Clique em Desarquivar para restaurá-los.">
+        {!archivedProjectsLoaded ? (
+          <p className="text-sm text-gray-400">Carregando...</p>
+        ) : archivedProjects.length === 0 ? (
+          <p className="text-sm text-gray-400">Nenhum projeto arquivado.</p>
+        ) : (
+          <div className="space-y-1.5">
+            {archivedProjects.map((p) => (
+              <div key={p.id} className="flex items-center justify-between py-2 px-3 bg-gray-50 rounded-lg border border-gray-100">
+                <div>
+                  <p className="text-sm font-medium text-gray-800">{p.name}</p>
+                  <p className="text-xs text-gray-400">{p.client} · {p.pm}</p>
+                </div>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => unarchiveProject(p.id)}
+                >
+                  Desarquivar
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
       </Section>
     </div>
   )

@@ -50,6 +50,10 @@ export interface Entry {
   comments: EntryComment[]
   links: Link[]
   order: number
+  createdAt?: string
+  updatedAt?: string
+  createdById?: string
+  updatedById?: string
 }
 
 export interface Phase {
@@ -118,6 +122,7 @@ export interface Project {
   type: ProjectType
   pm: string
   color?: string
+  archived?: boolean
   devLead?: string
   devType?: 'integration' | 'application'
   devIntegration?: string

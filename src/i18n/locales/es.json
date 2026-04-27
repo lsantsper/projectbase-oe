@@ -61,7 +61,20 @@
     "devLeadPlaceholder": "Nombre del Dev Lead",
     "devSubtitle": "Integración o aplicación personalizada",
     "templateStep": "1. Elija la plantilla",
-    "detailsStep": "2. Detalles"
+    "detailsStep": "2. Detalles",
+    "archiveTitle": "Archivar proyecto",
+    "archiveMessage": "El proyecto quedará oculto en el portafolio. Puede desarchivarlo en cualquier momento desde Configuración.",
+    "archive": "Archivar",
+    "unarchive": "Desarchivar",
+    "archived": "Archivado",
+    "showArchived": "Mostrar archivados ({{n}})",
+    "hideArchived": "Ocultar archivados"
+  },
+  "audit": {
+    "createdBy": "Creado por",
+    "by": "por",
+    "at": "el",
+    "updatedAt": "Última edición"
   },
   "portfolio": {
     "colProject": "Proyecto",

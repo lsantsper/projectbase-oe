@@ -112,6 +112,7 @@ interface AppStore {
 
   // Load / archive
   loadProjects: () => Promise<void>
+  loadSettings: () => Promise<void>
   loadArchivedProjects: () => Promise<void>
   archiveProject: (id: string) => Promise<void>
   unarchiveProject: (id: string) => Promise<void>
@@ -288,6 +289,21 @@ async function dbSyncRisk(projectId: string, risk: Risk, userId: string): Promis
   if (error) throw new Error(error.message)
 }
 
+async function syncGlobalSettings(settings: AppSettings, userId: string): Promise<void> {
+  const value = {
+    holidays: settings.holidays,
+    holidayNames: settings.holidayNames,
+    defaultLanguage: settings.defaultLanguage,
+    dateFormat: settings.dateFormat,
+    workdays: settings.workdays,
+    clients: settings.clients,
+  }
+  const { error } = await supabase
+    .from('settings')
+    .upsert({ key: 'config', value, updated_at: new Date().toISOString(), updated_by: userId }, { onConflict: 'key' })
+  if (error) throw new Error(error.message)
+}
+
 // ─── store ───────────────────────────────────────────────────────────────────
 
 export const useAppStore = create<AppStore>()(
@@ -410,6 +426,31 @@ export const useAppStore = create<AppStore>()(
         } catch (err) {
           useToastStore.getState().addToast(err instanceof Error ? err.message : 'Erro ao carregar projetos arquivados')
           set({ archivedProjectsLoaded: true })
+        }
+      },
+
+      async loadSettings() {
+        try {
+          const { data } = await supabase
+            .from('settings')
+            .select('value')
+            .eq('key', 'config')
+            .single()
+          if (!data?.value) return
+          const v = data.value as Partial<AppSettings>
+          set((s) => ({
+            settings: {
+              ...s.settings,
+              ...(v.holidays !== undefined && { holidays: v.holidays }),
+              ...(v.holidayNames !== undefined && { holidayNames: v.holidayNames }),
+              ...(v.defaultLanguage !== undefined && { defaultLanguage: v.defaultLanguage }),
+              ...(v.dateFormat !== undefined && { dateFormat: v.dateFormat }),
+              ...(v.workdays !== undefined && { workdays: v.workdays }),
+              ...(v.clients !== undefined && { clients: v.clients }),
+            },
+          }))
+        } catch {
+          // silently fail — settings will use defaults
         }
       },
 
@@ -1347,6 +1388,11 @@ export const useAppStore = create<AppStore>()(
 
       updateSettings(patch) {
         set((s) => ({ settings: { ...s.settings, ...patch } }))
+        const globalKeys: (keyof AppSettings)[] = ['holidays', 'holidayNames', 'defaultLanguage', 'dateFormat', 'workdays', 'clients']
+        const hasGlobal = (Object.keys(patch) as (keyof AppSettings)[]).some((k) => globalKeys.includes(k))
+        if (hasGlobal) {
+          sync(async () => syncGlobalSettings(get().settings, getUserId()))
+        }
       },
 
       updateTemplate(template) {
@@ -1372,6 +1418,7 @@ export const useAppStore = create<AppStore>()(
             },
           }
         })
+        sync(async () => syncGlobalSettings(get().settings, getUserId()))
       },
 
       removeHoliday(date) {
@@ -1385,6 +1432,7 @@ export const useAppStore = create<AppStore>()(
             },
           }
         })
+        sync(async () => syncGlobalSettings(get().settings, getUserId()))
       },
 
       addClient(name) {
@@ -1393,18 +1441,26 @@ export const useAppStore = create<AppStore>()(
           if (!trimmed || s.settings.clients.includes(trimmed)) return s
           return { settings: { ...s.settings, clients: [...s.settings.clients, trimmed].sort() } }
         })
+        sync(async () => syncGlobalSettings(get().settings, getUserId()))
       },
 
       removeClient(name) {
         set((s) => ({
           settings: { ...s.settings, clients: s.settings.clients.filter((c) => c !== name) },
         }))
+        sync(async () => syncGlobalSettings(get().settings, getUserId()))
       },
     }),
     {
       name: 'project-base-store',
-      // Persist only settings — projects are loaded from Supabase
-      partialize: (state) => ({ settings: state.settings }),
+      // Only persist local preferences — global settings are loaded from Supabase
+      partialize: (state) => ({
+        settings: {
+          templates: state.settings.templates,
+          templatesVersion: state.settings.templatesVersion,
+          sidebarCollapsed: state.settings.sidebarCollapsed,
+        },
+      }),
       merge: (persisted, current) => {
         const persistedObj = persisted as { settings?: Partial<AppSettings> }
         const persistedSettings = persistedObj.settings ?? {}
@@ -1413,7 +1469,7 @@ export const useAppStore = create<AppStore>()(
           ...current,
           settings: {
             ...current.settings,
-            ...persistedSettings,
+            sidebarCollapsed: persistedSettings.sidebarCollapsed,
             templatesVersion: TEMPLATES_VERSION,
             templates: shouldResetTemplates ? DEFAULT_TEMPLATES : (persistedSettings.templates ?? DEFAULT_TEMPLATES),
           },

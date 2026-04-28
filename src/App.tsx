@@ -18,7 +18,10 @@ export default function App() {
     // 1. Explicit session check on mount — reliable, doesn't wait for onAuthStateChange
     useAuthStore.getState().initialize().then(() => {
       const user = useAuthStore.getState().user
-      if (user) useAppStore.getState().loadProjects()
+      if (user) {
+        useAppStore.getState().loadProjects()
+        useAppStore.getState().loadSettings()
+      }
     })
 
     // 2. Watch for subsequent auth events (SIGNED_IN, SIGNED_OUT, TOKEN_REFRESHED)
@@ -29,6 +32,7 @@ export default function App() {
       if (session?.user) {
         useAuthStore.getState().loadProfile().then(() => {
           useAppStore.getState().loadProjects()
+          useAppStore.getState().loadSettings()
         })
       } else {
         useAuthStore.setState({ user: null, profile: null, loading: false })

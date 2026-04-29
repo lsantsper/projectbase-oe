@@ -1,12 +1,14 @@
-import { useState, useRef, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useAppStore } from '@/store/useAppStore'
+import { useToastStore } from '@/stores/useToastStore'
 import { Button } from '@/components/ui/Button'
 import { Modal } from '@/components/ui/Modal'
+import { Input, Field } from '@/components/ui/Input'
 import StatusBadge from '@/components/StatusBadge'
-import { ProjectStatus, Project, Entry } from '@/types'
+import { ProjectStatus, Project, Entry, AppLanguage } from '@/types'
 import { generateStatusReport, ReportConfig } from '@/utils/statusReport'
 import { useSmartPosition } from '@/hooks/useSmartPosition'
 import ReportConfigModal from '@/components/report/ReportConfigModal'
@@ -92,7 +94,7 @@ function GhostBtn({ onClick, disabled, children }: { onClick: () => void; disabl
 
 // ─── MoreMenu ─────────────────────────────────────────────────────────────────
 
-function MoreMenu({ onImportUpdate, onArchive }: { onImportUpdate: () => void; onArchive: () => void }) {
+function MoreMenu({ onImportUpdate, onDuplicate, onArchive }: { onImportUpdate: () => void; onDuplicate: () => void; onArchive: () => void }) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
   const { triggerRef, popoverRef, position } = useSmartPosition(open)
@@ -116,6 +118,21 @@ function MoreMenu({ onImportUpdate, onArchive }: { onImportUpdate: () => void; o
     return () => document.removeEventListener('keydown', handler)
   }, [open])
 
+  const menuItem = (onClick: () => void, danger: boolean, icon: React.ReactNode, label: string) => (
+    <button
+      onClick={() => { setOpen(false); onClick() }}
+      className="w-full flex items-center gap-2 px-3 py-2 text-left text-[12px] transition-colors"
+      style={{ color: danger ? 'var(--color-danger-text)' : 'var(--text-secondary)' }}
+      onMouseEnter={e => (e.currentTarget.style.background = 'var(--surface-subtle)')}
+      onMouseLeave={e => (e.currentTarget.style.background = '')}
+    >
+      {icon}
+      {label}
+    </button>
+  )
+
+  const sep = <div style={{ height: '0.5px', background: 'var(--border-default)', margin: '2px 8px' }} />
+
   return (
     <>
       <button
@@ -134,38 +151,254 @@ function MoreMenu({ onImportUpdate, onArchive }: { onImportUpdate: () => void; o
       {open && createPortal(
         <div
           ref={popoverRef as any}
-          className="py-1 w-48"
+          className="py-1 w-52"
           style={{ position: 'fixed', ...position, zIndex: 1000, background: 'var(--surface-card)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)' }}
         >
-          <button
-            onClick={() => { setOpen(false); onImportUpdate() }}
-            className="w-full flex items-center gap-2 px-3 py-2 text-left text-[12px] transition-colors"
-            style={{ color: 'var(--text-secondary)' }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'var(--surface-subtle)')}
-            onMouseLeave={e => (e.currentTarget.style.background = '')}
-          >
-            <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1M8 12l4-4m0 0l4 4m-4-4v12" />
-            </svg>
-            {t('import.importUpdate')}
-          </button>
-          <div style={{ height: '0.5px', background: 'var(--border-default)', margin: '2px 8px' }} />
-          <button
-            onClick={() => { setOpen(false); onArchive() }}
-            className="w-full flex items-center gap-2 px-3 py-2 text-left text-[12px] transition-colors"
-            style={{ color: 'var(--color-danger-text)' }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'var(--surface-subtle)')}
-            onMouseLeave={e => (e.currentTarget.style.background = '')}
-          >
-            <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
-            </svg>
-            {t('project.archiveTitle')}
-          </button>
+          {menuItem(onImportUpdate, false,
+            <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1M8 12l4-4m0 0l4 4m-4-4v12" /></svg>,
+            t('import.importUpdate'),
+          )}
+          {sep}
+          {menuItem(onDuplicate, false,
+            <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}><path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>,
+            t('project.duplicateCTA'),
+          )}
+          {sep}
+          {menuItem(onArchive, true,
+            <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}><path strokeLinecap="round" strokeLinejoin="round" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" /></svg>,
+            t('project.archiveTitle'),
+          )}
         </div>,
         document.body,
       )}
     </>
+  )
+}
+
+// ─── DuplicateModal ───────────────────────────────────────────────────────────
+
+function DuplicateModal({ open, project, onClose }: { open: boolean; project: Project; onClose: () => void }) {
+  const { t } = useTranslation()
+  const navigate = useNavigate()
+  const { settings, projects, duplicateProject } = useAppStore()
+  const { addToast } = useToastStore()
+
+  const [name, setName] = useState('')
+  const [client, setClient] = useState('')
+  const [isNewClient, setIsNewClient] = useState(false)
+  const [newClientName, setNewClientName] = useState('')
+  const [pm, setPm] = useState('')
+  const [language, setLanguage] = useState<AppLanguage>('pt')
+  const [hasDev, setHasDev] = useState(false)
+  const [devLead, setDevLead] = useState('')
+  const [devType, setDevType] = useState<'integration' | 'application'>('integration')
+  const [devIntegration, setDevIntegration] = useState('')
+  const [attempted, setAttempted] = useState(false)
+
+  // Pre-fill from source project when modal opens
+  useEffect(() => {
+    if (!open) return
+    setName(`${project.name} — cópia`)
+    setClient(project.client ?? '')
+    setIsNewClient(false)
+    setNewClientName('')
+    setPm(project.pm ?? '')
+    setLanguage(project.language ?? 'pt')
+    const hasDev = !!project.devType
+    setHasDev(hasDev)
+    setDevLead(project.devLead ?? '')
+    setDevType(project.devType ?? 'integration')
+    setDevIntegration(project.devIntegration ?? '')
+    setAttempted(false)
+  }, [open, project])
+
+  const allClients = useMemo(
+    () => [...new Set([...settings.clients, ...projects.map((p) => p.client).filter(Boolean)])].sort(),
+    [settings.clients, projects],
+  )
+
+  const allMembers = useMemo(
+    () => [...new Set(projects.flatMap((p) => [p.pm, p.devLead].filter(Boolean) as string[]))].sort(),
+    [projects],
+  )
+
+  const finalClient = isNewClient ? newClientName : client
+  const errors = {
+    name: attempted && !name.trim() ? t('errors.nameRequired') : '',
+    client: attempted && !finalClient.trim() ? t('errors.clientRequired') : '',
+    pm: attempted && !pm.trim() ? t('errors.pmRequired') : '',
+  }
+
+  function handleDuplicate() {
+    setAttempted(true)
+    if (!name.trim() || !finalClient.trim() || !pm.trim()) return
+    const newId = duplicateProject(project, {
+      name: name.trim(),
+      client: finalClient.trim(),
+      pm: pm.trim(),
+      language,
+      ...(hasDev && devType ? { devLead: devLead || undefined, devType, devIntegration: devIntegration || undefined } : {}),
+    })
+    onClose()
+    navigate(`/projects/${newId}`)
+    addToast(t('project.duplicateSuccess'), 'success')
+  }
+
+  return (
+    <Modal
+      open={open}
+      title={t('project.duplicateTitle')}
+      onClose={onClose}
+      size="md"
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>{t('actions.cancel')}</Button>
+          <Button onClick={handleDuplicate}>{t('project.duplicateCTA')} →</Button>
+        </>
+      }
+    >
+      <div className="space-y-5">
+        <div className="grid grid-cols-2 gap-4">
+          {/* Name */}
+          <Field label={t('project.name')} required className="col-span-2">
+            <Input
+              autoFocus
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className={errors.name ? 'border-red-400' : ''}
+            />
+            {errors.name && <p className="text-xs text-red-500 mt-1">{errors.name}</p>}
+          </Field>
+
+          {/* Client */}
+          <Field label={t('project.client')} required>
+            {isNewClient ? (
+              <div className="flex gap-1">
+                <Input
+                  value={newClientName}
+                  onChange={(e) => setNewClientName(e.target.value)}
+                  placeholder={t('project.newClient')}
+                  className="flex-1"
+                />
+                <button
+                  type="button"
+                  onClick={() => setIsNewClient(false)}
+                  className="text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] px-2 text-sm"
+                >×</button>
+              </div>
+            ) : (
+              <select
+                value={client}
+                onChange={(e) => {
+                  if (e.target.value === '__new__') { setIsNewClient(true); setClient('') }
+                  else setClient(e.target.value)
+                }}
+                className={`block w-full rounded-md border px-3 py-2 text-sm focus:border-[var(--oe-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--oe-primary)] ${errors.client ? 'border-red-400' : 'border-[var(--border-default)]'}`}
+              >
+                <option value="">{t('project.selectClient')}</option>
+                {allClients.map((c) => <option key={c} value={c}>{c}</option>)}
+                <option value="__new__">{t('project.newClient')}</option>
+              </select>
+            )}
+            {errors.client && <p className="text-xs text-red-500 mt-1">{errors.client}</p>}
+          </Field>
+
+          {/* PM */}
+          <Field label={t('project.pm')} required>
+            <input
+              list="dup-pm-options"
+              value={pm}
+              onChange={(e) => setPm(e.target.value)}
+              placeholder={t('project.pmPlaceholder')}
+              className={`block w-full rounded-md border px-3 py-2 text-sm focus:border-[var(--oe-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--oe-primary)] ${errors.pm ? 'border-red-400' : 'border-[var(--border-default)]'}`}
+            />
+            <datalist id="dup-pm-options">
+              {allMembers.map((m) => <option key={m} value={m} />)}
+            </datalist>
+            {errors.pm && <p className="text-xs text-red-500 mt-1">{errors.pm}</p>}
+          </Field>
+
+          {/* Language */}
+          <Field label={t('project.language')} className="col-span-2">
+            <div className="flex gap-1 mt-0.5">
+              {([['pt', '🇧🇷 PT'], ['en', '🇺🇸 EN'], ['es', '🇪🇸 ES']] as const).map(([l, label]) => (
+                <button
+                  key={l}
+                  type="button"
+                  onClick={() => setLanguage(l)}
+                  className={`flex-1 py-2 text-xs font-medium rounded-md border transition-colors ${
+                    language === l ? 'bg-[var(--oe-primary)] text-white border-[var(--oe-primary)]' : 'bg-[var(--surface-card)] text-[var(--text-secondary)] border-[var(--border-default)] hover:border-[var(--oe-primary)]'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </Field>
+        </div>
+
+        {/* Dev toggle */}
+        <div className="border border-[var(--border-default)] rounded-xl p-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-[var(--text-secondary)]">{t('project.hasDev')}</p>
+              <p className="text-xs text-[var(--text-tertiary)]">{t('project.devSubtitle')}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setHasDev((v) => !v)}
+              className={`relative w-11 h-6 rounded-full transition-colors ${hasDev ? 'bg-[var(--oe-primary)]' : 'bg-[var(--border-default)]'}`}
+            >
+              <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${hasDev ? 'translate-x-5' : ''}`} />
+            </button>
+          </div>
+
+          {hasDev && (
+            <div className="mt-4 grid grid-cols-2 gap-3">
+              <Field label={t('project.devType')}>
+                <div className="flex gap-1 mt-0.5">
+                  {(['integration', 'application'] as const).map((v) => (
+                    <button
+                      key={v}
+                      type="button"
+                      onClick={() => setDevType(v)}
+                      className={`flex-1 py-1.5 text-xs font-medium rounded-md border transition-colors ${
+                        devType === v ? 'bg-[var(--oe-primary)] text-white border-[var(--oe-primary)]' : 'bg-[var(--surface-card)] text-[var(--text-secondary)] border-[var(--border-default)] hover:border-[var(--oe-primary)]'
+                      }`}
+                    >
+                      {t(`project.${v}`)}
+                    </button>
+                  ))}
+                </div>
+              </Field>
+
+              <Field label={t('project.devLead')}>
+                <input
+                  list="dup-dev-options"
+                  value={devLead}
+                  onChange={(e) => setDevLead(e.target.value)}
+                  placeholder={t('project.devLeadPlaceholder')}
+                  className="block w-full rounded-md border border-[var(--border-default)] px-3 py-2 text-sm focus:border-[var(--oe-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--oe-primary)]"
+                />
+                <datalist id="dup-dev-options">
+                  {allMembers.map((m) => <option key={m} value={m} />)}
+                </datalist>
+              </Field>
+
+              {devType === 'integration' && (
+                <Field label={t('project.devIntegration')} className="col-span-2">
+                  <Input
+                    value={devIntegration}
+                    onChange={(e) => setDevIntegration(e.target.value)}
+                    placeholder="Ex: SAP, Protheus, Salesforce..."
+                  />
+                </Field>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </Modal>
   )
 }
 
@@ -186,6 +419,7 @@ export default function ProjectDetailPage() {
   const [showReportModal, setShowReportModal] = useState(false)
   const [showImportModal, setShowImportModal] = useState(false)
   const [showArchiveModal, setShowArchiveModal] = useState(false)
+  const [showDuplicateModal, setShowDuplicateModal] = useState(false)
 
   const project = projects.find((p) => p.id === id)
 
@@ -295,6 +529,7 @@ export default function ProjectDetailPage() {
         {/* More options */}
         <MoreMenu
           onImportUpdate={() => setShowImportModal(true)}
+          onDuplicate={() => setShowDuplicateModal(true)}
           onArchive={() => setShowArchiveModal(true)}
         />
       </div>
@@ -371,6 +606,12 @@ export default function ProjectDetailPage() {
           onClose={() => setShowImportModal(false)}
         />
       )}
+
+      <DuplicateModal
+        open={showDuplicateModal}
+        project={project}
+        onClose={() => setShowDuplicateModal(false)}
+      />
 
       <Modal
         open={showArchiveModal}

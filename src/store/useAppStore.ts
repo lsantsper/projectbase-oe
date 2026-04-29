@@ -120,6 +120,7 @@ interface AppStore {
 
   // Projects
   createProject: (data: Omit<Project, 'id' | 'phases' | 'risks' | 'delayLog' | 'team' | 'links' | 'status'>) => string
+  duplicateProject: (source: Project, overrides: { name: string; client: string; pm: string; language: AppLanguage; devLead?: string; devType?: 'integration' | 'application'; devIntegration?: string }) => string
   updateProject: (id: string, patch: Partial<Project>) => void
   deleteProject: (id: string) => void
   importProject: (project: Project) => void
@@ -633,6 +634,114 @@ export const useAppStore = create<AppStore>()(
             set({ projectSaving: false })
           }
         })()
+      },
+
+      duplicateProject(source, overrides) {
+        const newId = uuid()
+
+        // Pre-map all top-level entry IDs so dependsOn can be remapped
+        const entryIdMap = new Map<string, string>()
+        for (const phase of source.phases) {
+          for (const entry of phase.entries) {
+            entryIdMap.set(entry.id, uuid())
+          }
+        }
+
+        const resetEntry = (entry: Entry): Entry => ({
+          ...entry,
+          id: entryIdMap.get(entry.id) ?? uuid(),
+          dependsOn: entry.dependsOn.map((oldId) => entryIdMap.get(oldId) ?? oldId),
+          actualStart: undefined,
+          actualEnd: undefined,
+          status: 'pending' as EntryStatus,
+          statusOverride: false,
+          riskFlag: 'none' as RiskFlag,
+          comments: [],
+          baselineStart: undefined,
+          baselineEnd: undefined,
+          baselineDate: undefined,
+          subtasks: entry.subtasks.map((sub) => ({
+            ...sub,
+            id: uuid(),
+            actualStart: undefined,
+            actualEnd: undefined,
+            status: 'pending' as EntryStatus,
+            statusOverride: false,
+            riskFlag: 'none' as RiskFlag,
+            comments: [],
+            baselineStart: undefined,
+            baselineEnd: undefined,
+            baselineDate: undefined,
+          })),
+        })
+
+        const phases = applyIsCritical(
+          source.phases.map((ph) => ({
+            id: uuid(),
+            name: ph.name,
+            order: ph.order,
+            entries: ph.entries.map(resetEntry),
+          }))
+        )
+
+        const palette = ['#F59E0B','#10B981','#3B82F6','#8B5CF6','#EC4899','#EF4444','#06B6D4','#84CC16']
+        const color = palette[get().projects.length % palette.length]
+
+        const newProject: Project = {
+          ...overrides,
+          id: newId,
+          color,
+          type: source.type,
+          phases,
+          risks: source.risks.map((r) => ({
+            ...r,
+            id: uuid(),
+            actionTasks: r.actionTasks
+              .filter((t) => !t.done)
+              .map((t) => ({ ...t, id: uuid() })),
+          })),
+          delayLog: [],
+          team: source.team.map((m) => ({ ...m, id: uuid() })),
+          links: source.links.map((l) => ({ ...l, id: uuid() })),
+          charter: source.charter ? { ...source.charter } : undefined,
+          overview: source.overview,
+          status: 'planning',
+          archived: false,
+          baselineSetAt: undefined,
+        }
+
+        const prevProjects = get().projects
+        set((s) => ({ projects: [...s.projects, newProject], projectSaving: true }))
+
+        ;(async () => {
+          try {
+            const userId = getUserId()
+            const flat = storeProjectToDb(newProject, userId)
+            const { error: pe } = await supabase.from('projects').insert(flat.project)
+            if (pe) throw new Error(pe.message)
+            if (flat.phases.length) {
+              const { error: phe } = await supabase.from('phases').insert(flat.phases)
+              if (phe) throw new Error(phe.message)
+            }
+            if (flat.entries.length) {
+              const { error: ee } = await supabase.from('entries').insert(flat.entries)
+              if (ee) throw new Error(ee.message)
+            }
+            if (flat.risks.length) {
+              const { error: re } = await supabase.from('risks').insert(flat.risks)
+              if (re) throw new Error(re.message)
+            }
+          } catch (err) {
+            set({ projects: prevProjects })
+            useToastStore.getState().addToast(
+              err instanceof Error ? err.message : 'Erro ao duplicar projeto'
+            )
+          } finally {
+            set({ projectSaving: false })
+          }
+        })()
+
+        return newId
       },
 
       // ── Phases ────────────────────────────────────────────────────────────

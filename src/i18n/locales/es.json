@@ -62,6 +62,7 @@
     "devSubtitle": "Integración o aplicación personalizada",
     "templateStep": "1. Elija la plantilla",
     "detailsStep": "2. Detalles",
+    "exportJson": "Exportar JSON",
     "duplicateTitle": "Duplicar proyecto",
     "duplicateCTA": "Duplicar proyecto",
     "duplicateSuccess": "Proyecto duplicado con éxito",
@@ -87,7 +88,9 @@
     "colDev": "Dev",
     "colDuration": "Duración",
     "colStatus": "Estado",
-    "colVariance": "Variación"
+    "colVariance": "Variación",
+    "backupJson": "Backup JSON",
+    "backupIncludeArchived": "¿Incluir proyectos archivados en el backup?"
   },
   "tabs": {
     "overview": "Resumen",

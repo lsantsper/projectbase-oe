@@ -1,6 +1,7 @@
 import { useState, useMemo, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import ImportJsonModal from '@/components/import/ImportJsonModal'
+import { exportAllProjectsToJson } from '@/utils/exportJson'
 import { useTranslation } from 'react-i18next'
 import { useAppStore } from '@/store/useAppStore'
 import { Button } from '@/components/ui/Button'
@@ -602,6 +603,15 @@ export default function ProjectsPage() {
     navigate(`/projects/${id}`)
   }
 
+  async function handleBackup() {
+    let archived = archivedProjects
+    if (!archivedProjectsLoaded) {
+      await loadArchivedProjects()
+      archived = useAppStore.getState().archivedProjects
+    }
+    exportAllProjectsToJson(projects, archived, t('portfolio.backupIncludeArchived'))
+  }
+
   return (
     <div className="p-8 max-w-screen-xl mx-auto">
       {/* Header */}
@@ -719,6 +729,21 @@ export default function ProjectsPage() {
           initialTab="new"
           onClose={() => setShowImportModal(false)}
         />
+      )}
+
+      {/* Backup footer */}
+      {!projectsLoading && projects.length > 0 && (
+        <div className="mt-8 flex justify-center">
+          <button
+            onClick={handleBackup}
+            className="text-xs transition-colors"
+            style={{ color: 'var(--text-disabled)' }}
+            onMouseEnter={e => (e.currentTarget.style.color = 'var(--text-tertiary)')}
+            onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-disabled)')}
+          >
+            <span className="mr-1">↓</span>{t('portfolio.backupJson')}
+          </button>
+        </div>
       )}
     </div>
   )

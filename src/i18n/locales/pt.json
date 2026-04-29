@@ -62,6 +62,7 @@
     "devSubtitle": "Integração ou aplicação customizada",
     "templateStep": "1. Escolha o template",
     "detailsStep": "2. Detalhes",
+    "exportJson": "Exportar JSON",
     "duplicateTitle": "Duplicar projeto",
     "duplicateCTA": "Duplicar projeto",
     "duplicateSuccess": "Projeto duplicado com sucesso",
@@ -87,7 +88,9 @@
     "colDev": "Dev",
     "colDuration": "Duração",
     "colStatus": "Status",
-    "colVariance": "Variação"
+    "colVariance": "Variação",
+    "backupJson": "Backup JSON",
+    "backupIncludeArchived": "Incluir projetos arquivados no backup?"
   },
   "tabs": {
     "overview": "Overview",

@@ -13,6 +13,7 @@ interface Props {
   defaultType: EntryType
   defaultPhaseId?: string
   parentId?: string
+  parentEntryId?: string
   entryNameMap: Map<string, string>
   onClose: () => void
 }
@@ -31,12 +32,13 @@ type Form = {
   durationHours: number
   dependsOn: string[]
   order: number
+  linkedParentId: string
 }
 
 const TYPE_ICONS: Record<EntryType, string> = { task: '✅', milestone: '🏁', meeting: '📅' }
 
 export default function AddEntryModal({
-  open, projectId, phases, defaultType, defaultPhaseId, parentId, entryNameMap, onClose,
+  open, projectId, phases, defaultType, defaultPhaseId, parentId, parentEntryId, entryNameMap, onClose,
 }: Props) {
   const { t } = useTranslation()
   const { addEntry, addSubtask } = useAppStore()
@@ -57,12 +59,18 @@ export default function AddEntryModal({
     durationHours: 1,
     dependsOn: [],
     order: 0,
+    linkedParentId: parentEntryId ?? '',
   })
 
   const stableDefault = defaultType
   useMemo(() => {
-    setForm((f) => ({ ...f, type: stableDefault, phaseId: defaultPhaseId ?? phases[0]?.id ?? '' }))
-  }, [stableDefault, defaultPhaseId, open])
+    setForm((f) => ({
+      ...f,
+      type: stableDefault,
+      phaseId: defaultPhaseId ?? phases[0]?.id ?? '',
+      linkedParentId: parentEntryId ?? '',
+    }))
+  }, [stableDefault, defaultPhaseId, parentEntryId, open])
 
   function set<K extends keyof Form>(k: K, v: Form[K]) {
     setForm((f) => ({ ...f, [k]: v }))
@@ -100,6 +108,7 @@ export default function AddEntryModal({
       plannedDate: form.type !== 'task' ? form.plannedDate || undefined : undefined,
       durationDays: form.type === 'task' ? form.durationDays : undefined,
       durationHours: form.type === 'meeting' ? form.durationHours : undefined,
+      parentEntryId: form.type === 'meeting' && form.linkedParentId ? form.linkedParentId : undefined,
     }
 
     if (parentId) {
@@ -110,6 +119,24 @@ export default function AddEntryModal({
 
     onClose()
   }
+
+  const availableParentTasks = useMemo(() => {
+    const result: { id: string; name: string; phaseId: string }[] = []
+    for (const ph of phases) {
+      for (const e of ph.entries) {
+        if (e.type === 'task') result.push({ id: e.id, name: e.name, phaseId: ph.id })
+      }
+    }
+    return result
+  }, [phases])
+
+  // Find parent task for date-range warning
+  const parentTask = form.type === 'meeting' && form.linkedParentId
+    ? availableParentTasks.find((t) => t.id === form.linkedParentId)
+      ? phases.flatMap((ph) => ph.entries).find((e) => e.id === form.linkedParentId)
+      : undefined
+    : undefined
+  const parentEndWarning = parentTask?.plannedEnd && form.plannedDate && form.plannedDate > parentTask.plannedEnd
 
   const availableDeps = useMemo(() => {
     const result: { id: string; name: string; phaseId: string; phaseName: string }[] = []
@@ -141,7 +168,7 @@ export default function AddEntryModal({
     >
       <div className="space-y-4">
         {/* Type selector */}
-        {!isSubtask && (
+        {!isSubtask && !parentEntryId && (
           <div className="flex gap-2">
             {(['task', 'milestone', 'meeting'] as EntryType[]).map((type) => (
               <button
@@ -215,6 +242,26 @@ export default function AddEntryModal({
           {form.type === 'meeting' && (
             <Field label={t('entry.durationHours')}>
               <Input type="number" min={0.5} step={0.5} value={form.durationHours} onChange={(e) => set('durationHours', Number(e.target.value))} />
+            </Field>
+          )}
+
+          {form.type === 'meeting' && (
+            <Field label={t('plan.linkedTask')} className="col-span-2">
+              <Select
+                value={form.linkedParentId}
+                onChange={(e) => set('linkedParentId', e.target.value)}
+                disabled={!!parentEntryId}
+              >
+                <option value="">— {t('plan.linkedTaskNone')} —</option>
+                {availableParentTasks.map((task) => (
+                  <option key={task.id} value={task.id}>{task.name}</option>
+                ))}
+              </Select>
+              {parentEndWarning && (
+                <p className="text-xs text-amber-600 mt-1">
+                  ⚠ {t('plan.childMeetingOutOfRange')}
+                </p>
+              )}
             </Field>
           )}
 

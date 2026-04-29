@@ -39,6 +39,7 @@ function projectToExportShape(project: Project) {
         name: e.name,
         responsible: e.responsible || undefined,
         dependsOn: e.dependsOn.length > 0 ? e.dependsOn : undefined,
+        ...(e.parentEntryId && { parentEntryTempId: e.parentEntryId }),
         plannedStart: e.plannedStart,
         plannedEnd: e.plannedEnd,
         plannedDate: e.plannedDate,

@@ -34,16 +34,30 @@ export function exportProjectCsv(project: Project, holidays: string[]) {
   const nameMap = buildEntryNameMap(project.phases)
 
   const headers = [
-    'Fase', 'Nível', 'Tipo', 'Nome', 'Responsável', 'Dependências',
+    'Fase', 'Nível', 'Tipo', 'Nome', 'Tarefa pai', 'Responsável', 'Dependências',
     'Início Plan.', 'Fim Plan.', 'BL Início', 'BL Fim',
     'Início Real', 'Fim Real', 'Variação (d úteis)', 'Duração',
     'Status', 'Risco', 'Caminho Crítico',
   ]
 
+  // Build child meetings map: parentEntryId → entries
+  const childMeetingsByParent = new Map<string, typeof project.phases[0]['entries']>()
+  for (const phase of project.phases) {
+    for (const e of phase.entries) {
+      if (e.parentEntryId) {
+        const list = childMeetingsByParent.get(e.parentEntryId) ?? []
+        list.push(e)
+        childMeetingsByParent.set(e.parentEntryId, list)
+      }
+    }
+  }
+
   const rows: string[][] = [headers]
 
   for (const phase of project.phases) {
     for (const entry of phase.entries) {
+      if (entry.parentEntryId) continue  // rendered under parent below
+
       // Entry row (level 0)
       const entryBlEnd = entry.type === 'task' ? entry.baselineEnd : entry.baselineDate
       const entryPlanned = entry.type === 'task' ? entry.plannedEnd : entry.plannedDate
@@ -54,6 +68,7 @@ export function exportProjectCsv(project: Project, holidays: string[]) {
         cell('Entrada'),
         cell(entry.type),
         cell(entry.name),
+        cell(''),
         cell(entry.responsible),
         cell(entryDeps),
         cell(fmtDate(entry.plannedStart ?? entry.plannedDate)),
@@ -71,7 +86,7 @@ export function exportProjectCsv(project: Project, holidays: string[]) {
         cell(entry.isCritical ? 'Sim' : 'Não'),
       ])
 
-      // Subtask rows (level 1, indented with ↳ prefix)
+      // Subtask rows (level 1)
       for (const sub of entry.subtasks) {
         const subBlEnd = sub.type === 'task' ? sub.baselineEnd : sub.baselineDate
         const subPlanned = sub.type === 'task' ? sub.plannedEnd : sub.plannedDate
@@ -82,6 +97,7 @@ export function exportProjectCsv(project: Project, holidays: string[]) {
           cell('Subtarefa'),
           cell(sub.type),
           cell(`    ↳ ${sub.name}`),
+          cell(entry.name),
           cell(sub.responsible),
           cell(subDeps),
           cell(fmtDate(sub.plannedStart ?? sub.plannedDate)),
@@ -97,6 +113,33 @@ export function exportProjectCsv(project: Project, holidays: string[]) {
           cell(sub.status),
           cell(sub.riskFlag),
           cell(sub.isCritical ? 'Sim' : 'Não'),
+        ])
+      }
+
+      // Child meeting rows (level 1)
+      const childMeetings = childMeetingsByParent.get(entry.id) ?? []
+      for (const cm of childMeetings) {
+        const cmDeps = cm.dependsOn.map((id) => nameMap.get(id) ?? id).join('; ')
+
+        rows.push([
+          cell(phase.name),
+          cell('Reunião vinculada'),
+          cell(cm.type),
+          cell(`    📅 ${cm.name}`),
+          cell(entry.name),
+          cell(cm.responsible),
+          cell(cmDeps),
+          cell(fmtDate(cm.plannedDate)),
+          cell(fmtDate(cm.plannedDate)),
+          cell(fmtDate(cm.baselineDate)),
+          cell(fmtDate(cm.baselineDate)),
+          cell(fmtDate(cm.actualStart)),
+          cell(fmtDate(cm.actualEnd)),
+          cell(variance(cm.plannedDate, cm.baselineDate, holidays)),
+          cell(cm.durationHours ? `${cm.durationHours}h` : ''),
+          cell(cm.status),
+          cell(cm.riskFlag),
+          cell('Não'),
         ])
       }
     }

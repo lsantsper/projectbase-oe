@@ -540,7 +540,7 @@ function DepsCell({ entry, phases, projectId }: {
             {t('plan.dependencies')}
           </p>
           {phases.map((ph) => {
-            const candidates = ph.entries.filter((e) => e.id !== entry.id)
+            const candidates = ph.entries.filter((e) => e.id !== entry.id && !e.parentEntryId)
             if (candidates.length === 0) return null
             return (
               <div key={ph.id}>
@@ -964,7 +964,7 @@ export default function PlanPage({ projectId, onNavigateToRisk }: { projectId: s
   const project = projects.find((p) => p.id === projectId)!
 
   const [collapsedPhases, setCollapsedPhases] = useState<Set<string>>(new Set())
-  const [addModal, setAddModal] = useState<{ type: EntryType; phaseId?: string; parentId?: string } | null>(null)
+  const [addModal, setAddModal] = useState<{ type: EntryType; phaseId?: string; parentId?: string; parentEntryId?: string } | null>(null)
   const [commentsEntry, setCommentsEntry] = useState<Entry | null>(null)
   const [pendingDate, setPendingDate] = useState<PendingDate | null>(null)
   const [addingPhase, setAddingPhase] = useState(false)
@@ -1024,16 +1024,34 @@ export default function PlanPage({ projectId, onNavigateToRisk }: { projectId: s
     return map
   }, [project.phases])
 
-  // Build flat data for TanStack (entries → subRows for subtasks)
+  // Build flat data for TanStack (entries → subRows for subtasks + child meetings)
   const data = useMemo<PlanRow[]>(() => {
+    // Collect child meetings grouped by parentEntryId
+    const childMeetingsByParent = new Map<string, PlanRow[]>()
+    for (const ph of project.phases) {
+      for (const e of ph.entries) {
+        if (e.parentEntryId) {
+          const list = childMeetingsByParent.get(e.parentEntryId) ?? []
+          list.push({ ...e, _phaseId: ph.id })
+          childMeetingsByParent.set(e.parentEntryId, list)
+        }
+      }
+    }
+
     return project.phases.flatMap((ph) =>
-      ph.entries.map((e) => ({
-        ...e,
-        _phaseId: ph.id,
-        subRows: e.subtasks.length > 0
-          ? e.subtasks.map((sub) => ({ ...sub, _phaseId: ph.id }))
-          : undefined,
-      })),
+      ph.entries
+        .filter((e) => !e.parentEntryId)
+        .map((e) => {
+          const childMtgs = childMeetingsByParent.get(e.id) ?? []
+          const subRows: PlanRow[] | undefined =
+            e.subtasks.length > 0 || childMtgs.length > 0
+              ? [
+                  ...e.subtasks.map((sub) => ({ ...sub, _phaseId: ph.id })),
+                  ...childMtgs,
+                ]
+              : undefined
+          return { ...e, _phaseId: ph.id, subRows }
+        }),
     )
   }, [project.phases])
 
@@ -1269,8 +1287,18 @@ export default function PlanPage({ projectId, onNavigateToRisk }: { projectId: s
                 style={{ fontSize: 12, color: 'var(--text-tertiary)' }}
                 onMouseEnter={ev => { ev.currentTarget.style.color = 'var(--oe-primary)'; ev.currentTarget.style.background = 'var(--oe-primary-light)' }}
                 onMouseLeave={ev => { ev.currentTarget.style.color = 'var(--text-tertiary)'; ev.currentTarget.style.background = '' }}
-                title="Adicionar subtarefa"
+                title={t('entry.addSubtask')}
               >+</button>
+            )}
+            {row.depth === 0 && e.type === 'task' && (
+              <button
+                onClick={() => setAddModal({ type: 'meeting', phaseId, parentEntryId: e.id })}
+                className="w-5 h-5 flex items-center justify-center rounded transition-colors"
+                style={{ fontSize: 11, color: 'var(--text-tertiary)' }}
+                onMouseEnter={ev => { ev.currentTarget.style.color = '#7C3AED'; ev.currentTarget.style.background = '#EDE9FE' }}
+                onMouseLeave={ev => { ev.currentTarget.style.color = 'var(--text-tertiary)'; ev.currentTarget.style.background = '' }}
+                title={t('plan.addChildMeeting')}
+              >📅</button>
             )}
             <button
               onClick={() => deleteEntry(projectId, phaseId, e.id)}
@@ -1516,6 +1544,7 @@ export default function PlanPage({ projectId, onNavigateToRisk }: { projectId: s
           defaultType={addModal.type}
           defaultPhaseId={addModal.phaseId}
           parentId={addModal.parentId}
+          parentEntryId={addModal.parentEntryId}
           entryNameMap={entryNameMap}
           onClose={() => setAddModal(null)}
         />

@@ -30,9 +30,20 @@ type KanbanCard = Entry & {
 }
 
 function buildCards(phases: Phase[]): KanbanCard[] {
+  // Build parent name lookup for child meetings
+  const entryNameMap = new Map<string, string>()
+  for (const ph of phases) {
+    for (const e of ph.entries) entryNameMap.set(e.id, e.name)
+  }
+
   const cards: KanbanCard[] = []
   for (const ph of phases) {
     for (const e of ph.entries) {
+      if (e.parentEntryId) {
+        // Child meeting — show as card with parent task name
+        cards.push({ ...e, _phaseId: ph.id, _phaseName: ph.name, _isSubtask: false, _parentName: entryNameMap.get(e.parentEntryId) })
+        continue
+      }
       cards.push({ ...e, _phaseId: ph.id, _phaseName: ph.name, _isSubtask: false })
       for (const sub of e.subtasks) {
         cards.push({ ...sub, _phaseId: ph.id, _phaseName: ph.name, _isSubtask: true, _parentName: e.name })
@@ -72,7 +83,12 @@ function Card({ card, holidays, ghost = false }: { card: KanbanCard; holidays: s
         <span className={`w-2 h-2 rounded-full shrink-0 mt-1.5 ${riskCls}`} />
       </div>
 
-      <p className="text-xs text-gray-400 mb-2">{card._phaseName}</p>
+      <p className="text-xs text-gray-400 mb-2">
+        {card._phaseName}
+        {card._parentName && !card._isSubtask && (
+          <span className="ml-1 text-purple-400">· {card._parentName}</span>
+        )}
+      </p>
 
       {card.responsible && (
         <p className="text-xs text-gray-500 mb-2">

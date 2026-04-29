@@ -943,7 +943,13 @@ export const useAppStore = create<AppStore>()(
               ...p,
               phases: p.phases.map((ph) =>
                 ph.id !== phaseId
-                  ? ph
+                  ? {
+                      ...ph,
+                      // Unlink child meetings whose parent is the deleted entry
+                      entries: ph.entries.map((e) =>
+                        e.parentEntryId === entryId ? { ...e, parentEntryId: undefined } : e,
+                      ),
+                    }
                   : {
                       ...ph,
                       entries: ph.entries

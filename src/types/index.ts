@@ -50,6 +50,7 @@ export interface Entry {
   comments: EntryComment[]
   links: Link[]
   order: number
+  parentEntryId?: string
   createdAt?: string
   updatedAt?: string
   createdById?: string

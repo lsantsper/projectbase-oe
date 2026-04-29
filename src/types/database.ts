@@ -144,6 +144,7 @@ export interface DbEntry {
   status: EntryStatus | null
   status_override: boolean | null
   order: number | null
+  parent_entry_id: string | null
   subtasks: DbSubtaskJson[] | null    // JSONB
   links: DbLink[] | null              // JSONB
   created_at: string | null

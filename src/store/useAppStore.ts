@@ -106,6 +106,7 @@ const DEFAULT_TEMPLATES: ProjectTemplate[] = [
 interface AppStore {
   projects: Project[]
   projectsLoading: boolean
+  projectSaving: boolean
   archivedProjects: Project[]
   archivedProjectsLoaded: boolean
   settings: AppSettings
@@ -225,8 +226,13 @@ function getUserId(): string {
   return user.id
 }
 
-function sync(fn: () => Promise<void>): void {
+/**
+ * Fire-and-forget async DB call.
+ * On error: optionally reverts local state, then shows toast.
+ */
+function sync(fn: () => Promise<void>, revert?: () => void): void {
   fn().catch((err) => {
+    revert?.()
     useToastStore.getState().addToast(
       err instanceof Error ? err.message : 'Erro ao salvar'
     )
@@ -311,6 +317,7 @@ export const useAppStore = create<AppStore>()(
     (set, get) => ({
       projects: [],
       projectsLoading: false,
+      projectSaving: false,
       archivedProjects: [],
       archivedProjectsLoaded: false,
       settings: {
@@ -323,7 +330,7 @@ export const useAppStore = create<AppStore>()(
         clients: [],
       },
 
-      // ── Load / Archive ────────────────────────────────────────────────────
+      // ── Load / Settings ───────────────────────────────────────────────────
 
       async loadProjects() {
         set({ projectsLoading: true })
@@ -376,8 +383,34 @@ export const useAppStore = create<AppStore>()(
         }
       },
 
+      async loadSettings() {
+        try {
+          const { data } = await supabase
+            .from('settings')
+            .select('value')
+            .eq('key', 'config')
+            .single()
+          if (!data?.value) return
+          const v = data.value as Partial<AppSettings>
+          set((s) => ({
+            settings: {
+              ...s.settings,
+              ...(v.holidays !== undefined && { holidays: v.holidays }),
+              ...(v.holidayNames !== undefined && { holidayNames: v.holidayNames }),
+              ...(v.defaultLanguage !== undefined && { defaultLanguage: v.defaultLanguage }),
+              ...(v.dateFormat !== undefined && { dateFormat: v.dateFormat }),
+              ...(v.workdays !== undefined && { workdays: v.workdays }),
+              ...(v.clients !== undefined && { clients: v.clients }),
+            },
+          }))
+        } catch {
+          // silently fail — settings will use defaults
+        }
+      },
+
       async archiveProject(id) {
-        const project = get().projects.find((p) => p.id === id)
+        const prev = get().projects
+        const project = prev.find((p) => p.id === id)
         set((s) => ({
           projects: s.projects.filter((p) => p.id !== id),
           archivedProjects: project
@@ -388,7 +421,13 @@ export const useAppStore = create<AppStore>()(
           .from('projects')
           .update({ archived: true, updated_at: new Date().toISOString() })
           .eq('id', id)
-        if (error) useToastStore.getState().addToast(error.message)
+        if (error) {
+          set((s) => ({
+            projects: prev,
+            archivedProjects: s.archivedProjects.filter((p) => p.id !== id),
+          }))
+          useToastStore.getState().addToast(error.message)
+        }
       },
 
       async loadArchivedProjects() {
@@ -429,36 +468,12 @@ export const useAppStore = create<AppStore>()(
         }
       },
 
-      async loadSettings() {
-        try {
-          const { data } = await supabase
-            .from('settings')
-            .select('value')
-            .eq('key', 'config')
-            .single()
-          if (!data?.value) return
-          const v = data.value as Partial<AppSettings>
-          set((s) => ({
-            settings: {
-              ...s.settings,
-              ...(v.holidays !== undefined && { holidays: v.holidays }),
-              ...(v.holidayNames !== undefined && { holidayNames: v.holidayNames }),
-              ...(v.defaultLanguage !== undefined && { defaultLanguage: v.defaultLanguage }),
-              ...(v.dateFormat !== undefined && { dateFormat: v.dateFormat }),
-              ...(v.workdays !== undefined && { workdays: v.workdays }),
-              ...(v.clients !== undefined && { clients: v.clients }),
-            },
-          }))
-        } catch {
-          // silently fail — settings will use defaults
-        }
-      },
-
       async unarchiveProject(id) {
         const project = get().archivedProjects.find((p) => p.id === id)
         if (!project) return
         const palette = ['#F59E0B','#10B981','#3B82F6','#8B5CF6','#EC4899','#EF4444','#06B6D4','#84CC16']
         const color = palette[get().projects.length % palette.length]
+        const prevArchived = get().archivedProjects
         set((s) => ({
           archivedProjects: s.archivedProjects.filter((p) => p.id !== id),
           projects: [...s.projects, { ...project, archived: false, color }],
@@ -467,7 +482,13 @@ export const useAppStore = create<AppStore>()(
           .from('projects')
           .update({ archived: false, updated_at: new Date().toISOString() })
           .eq('id', id)
-        if (error) useToastStore.getState().addToast(error.message)
+        if (error) {
+          set((s) => ({
+            archivedProjects: prevArchived,
+            projects: s.projects.filter((p) => p.id !== id),
+          }))
+          useToastStore.getState().addToast(error.message)
+        }
       },
 
       // ── Projects ──────────────────────────────────────────────────────────
@@ -539,27 +560,38 @@ export const useAppStore = create<AppStore>()(
           status: 'planning',
         }
 
-        set((s) => ({ projects: [...s.projects, project] }))
+        const prevProjects = get().projects
+        set((s) => ({ projects: [...s.projects, project], projectSaving: true }))
 
-        sync(async () => {
-          const userId = getUserId()
-          const flat = storeProjectToDb(project, userId)
-          const { error: pe } = await supabase.from('projects').insert(flat.project)
-          if (pe) throw new Error(pe.message)
-          if (flat.phases.length) {
-            const { error: phe } = await supabase.from('phases').insert(flat.phases)
-            if (phe) throw new Error(phe.message)
+        ;(async () => {
+          try {
+            const userId = getUserId()
+            const flat = storeProjectToDb(project, userId)
+            const { error: pe } = await supabase.from('projects').insert(flat.project)
+            if (pe) throw new Error(pe.message)
+            if (flat.phases.length) {
+              const { error: phe } = await supabase.from('phases').insert(flat.phases)
+              if (phe) throw new Error(phe.message)
+            }
+            if (flat.entries.length) {
+              const { error: ee } = await supabase.from('entries').insert(flat.entries)
+              if (ee) throw new Error(ee.message)
+            }
+          } catch (err) {
+            set({ projects: prevProjects })
+            useToastStore.getState().addToast(
+              err instanceof Error ? err.message : 'Erro ao criar projeto'
+            )
+          } finally {
+            set({ projectSaving: false })
           }
-          if (flat.entries.length) {
-            const { error: ee } = await supabase.from('entries').insert(flat.entries)
-            if (ee) throw new Error(ee.message)
-          }
-        })
+        })()
 
         return id
       },
 
       updateProject(id, patch) {
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, id, (p) => ({ ...p, ...patch })),
         }))
@@ -567,35 +599,47 @@ export const useAppStore = create<AppStore>()(
           const project = get().projects.find((p) => p.id === id)
           if (!project) return
           await dbSyncProjectRow(project, getUserId())
-        })
+        }, () => set({ projects: prev }))
       },
 
       deleteProject(id) {
+        const prev = get().projects
         set((s) => ({ projects: s.projects.filter((p) => p.id !== id) }))
         sync(async () => {
           const { error } = await supabase.from('projects').delete().eq('id', id)
           if (error) throw new Error(error.message)
-        })
+        }, () => set({ projects: prev }))
       },
 
       importProject(project) {
-        set((s) => ({ projects: [...s.projects, project] }))
-        sync(async () => {
-          const userId = getUserId()
-          const flat = storeProjectToDb(project, userId)
-          await supabase.from('projects').upsert(flat.project)
-          if (flat.phases.length) await supabase.from('phases').upsert(flat.phases)
-          if (flat.entries.length) await supabase.from('entries').upsert(flat.entries)
-          if (flat.risks.length) await supabase.from('risks').upsert(flat.risks)
-          if (flat.delay_log.length) await supabase.from('delay_log').upsert(flat.delay_log)
-          if (flat.comments.length) await supabase.from('comments').upsert(flat.comments)
-        })
+        const prevProjects = get().projects
+        set((s) => ({ projects: [...s.projects, project], projectSaving: true }))
+        ;(async () => {
+          try {
+            const userId = getUserId()
+            const flat = storeProjectToDb(project, userId)
+            await supabase.from('projects').upsert(flat.project)
+            if (flat.phases.length) await supabase.from('phases').upsert(flat.phases)
+            if (flat.entries.length) await supabase.from('entries').upsert(flat.entries)
+            if (flat.risks.length) await supabase.from('risks').upsert(flat.risks)
+            if (flat.delay_log.length) await supabase.from('delay_log').upsert(flat.delay_log)
+            if (flat.comments.length) await supabase.from('comments').upsert(flat.comments)
+          } catch (err) {
+            set({ projects: prevProjects })
+            useToastStore.getState().addToast(
+              err instanceof Error ? err.message : 'Erro ao importar projeto'
+            )
+          } finally {
+            set({ projectSaving: false })
+          }
+        })()
       },
 
       // ── Phases ────────────────────────────────────────────────────────────
 
       addPhase(projectId, name) {
         const phaseId = uuid()
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
@@ -614,10 +658,11 @@ export const useAppStore = create<AppStore>()(
             created_at: new Date().toISOString(),
           })
           if (error) throw new Error(error.message)
-        })
+        }, () => set({ projects: prev }))
       },
 
       updatePhase(projectId, phaseId, patch) {
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
@@ -632,10 +677,11 @@ export const useAppStore = create<AppStore>()(
             .update({ name: phase.name, order: phase.order })
             .eq('id', phaseId)
           if (error) throw new Error(error.message)
-        })
+        }, () => set({ projects: prev }))
       },
 
       deletePhase(projectId, phaseId) {
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
@@ -646,10 +692,11 @@ export const useAppStore = create<AppStore>()(
           await supabase.from('entries').delete().eq('phase_id', phaseId)
           const { error } = await supabase.from('phases').delete().eq('id', phaseId)
           if (error) throw new Error(error.message)
-        })
+        }, () => set({ projects: prev }))
       },
 
       reorderPhases(projectId, phases) {
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({ ...p, phases })),
         }))
@@ -659,13 +706,14 @@ export const useAppStore = create<AppStore>()(
               supabase.from('phases').update({ order: ph.order }).eq('id', ph.id)
             )
           )
-        })
+        }, () => set({ projects: prev }))
       },
 
       // ── Entries ───────────────────────────────────────────────────────────
 
       addEntry(projectId, phaseId, entryData) {
         const entryId = uuid()
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) =>
             refreshCriticalPath({
@@ -699,11 +747,12 @@ export const useAppStore = create<AppStore>()(
           if (!entry || !phase || !project) return
           const { error } = await supabase.from('entries').insert(storeEntryToDb(entry, phaseId, projectId, userId))
           if (error) throw new Error(error.message)
-        })
+        }, () => set({ projects: prev }))
       },
 
       addSubtask(projectId, phaseId, parentId, entryData) {
         const subtaskId = uuid()
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) =>
             refreshCriticalPath({
@@ -749,10 +798,11 @@ export const useAppStore = create<AppStore>()(
             .update({ ...updateFields, updated_at: new Date().toISOString() })
             .eq('id', parentId)
           if (error) throw new Error(error.message)
-        })
+        }, () => set({ projects: prev }))
       },
 
       updateEntry(projectId, entryId, patch) {
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) =>
             refreshCriticalPath({
@@ -773,10 +823,11 @@ export const useAppStore = create<AppStore>()(
           const project = get().projects.find((p) => p.id === projectId)
           if (!project) return
           await dbSyncEntry(project, entryId, getUserId())
-        })
+        }, () => set({ projects: prev }))
       },
 
       deleteEntry(projectId, phaseId, entryId) {
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) =>
             refreshCriticalPath({
@@ -798,13 +849,7 @@ export const useAppStore = create<AppStore>()(
           ),
         }))
         sync(async () => {
-          // Check if it was a top-level entry (already removed from state, so delete from DB)
-          // For subtasks, upsert the parent. We need to find the parent before state was updated.
-          // Since state already updated, just try deleting — if it's a subtask, DB row doesn't exist
-          // and the parent was already updated via storeEntryToDb in addSubtask flow.
-          // Simplest: attempt delete (no-op if subtask), and also upsert all entries to sync subtask removal.
           const { error: delErr } = await supabase.from('entries').delete().eq('id', entryId)
-          // If no rows deleted, it was a subtask — upsert all entries to sync
           if (!delErr) {
             const project = get().projects.find((p) => p.id === projectId)
             if (project) {
@@ -812,11 +857,12 @@ export const useAppStore = create<AppStore>()(
               await dbSyncAllEntries(project, userId)
             }
           }
-        })
+        }, () => set({ projects: prev }))
       },
 
       updateEntryStatus(projectId, entryId, status) {
         const now = new Date().toISOString().split('T')[0]
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
@@ -839,11 +885,12 @@ export const useAppStore = create<AppStore>()(
           const project = get().projects.find((p) => p.id === projectId)
           if (!project) return
           await dbSyncEntry(project, entryId, getUserId())
-        })
+        }, () => set({ projects: prev }))
       },
 
       resetStatusOverride(projectId, entryId) {
         const today = new Date().toISOString().split('T')[0]
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
@@ -864,11 +911,12 @@ export const useAppStore = create<AppStore>()(
           const project = get().projects.find((p) => p.id === projectId)
           if (!project) return
           await dbSyncEntry(project, entryId, getUserId())
-        })
+        }, () => set({ projects: prev }))
       },
 
       recalculateStatuses(projectId) {
         const today = new Date().toISOString().split('T')[0]
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
@@ -885,7 +933,7 @@ export const useAppStore = create<AppStore>()(
           const project = get().projects.find((p) => p.id === projectId)
           if (!project) return
           await dbSyncAllEntries(project, getUserId())
-        })
+        }, () => set({ projects: prev }))
       },
 
       updateEntryRisk(projectId, entryId, flag) {
@@ -900,6 +948,7 @@ export const useAppStore = create<AppStore>()(
 
         const { settings } = get()
         const prevEntry = findEntryDeep(project.phases, entryId)
+        const prev = get().projects
 
         const newPhases = applyIsCritical(
           applyDateChange(project, entryId, field, value, settings.holidays),
@@ -964,12 +1013,13 @@ export const useAppStore = create<AppStore>()(
               if (error) throw new Error(error.message)
             }
           }
-        })
+        }, () => set({ projects: prev }))
       },
 
       // ── Baseline ──────────────────────────────────────────────────────────
 
       setBaseline(projectId) {
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
@@ -997,10 +1047,11 @@ export const useAppStore = create<AppStore>()(
           if (!project) return
           await dbSyncProjectRow(project, userId)
           await dbSyncAllEntries(project, userId)
-        })
+        }, () => set({ projects: prev }))
       },
 
       clearBaseline(projectId) {
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
@@ -1028,7 +1079,7 @@ export const useAppStore = create<AppStore>()(
           if (!project) return
           await dbSyncProjectRow(project, userId)
           await dbSyncAllEntries(project, userId)
-        })
+        }, () => set({ projects: prev }))
       },
 
       // ── Risks ─────────────────────────────────────────────────────────────
@@ -1036,6 +1087,7 @@ export const useAppStore = create<AppStore>()(
       addRisk(projectId, risk) {
         const id = uuid()
         const newRisk: Risk = { ...risk, id }
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
@@ -1046,10 +1098,11 @@ export const useAppStore = create<AppStore>()(
           const userId = getUserId()
           const { error } = await supabase.from('risks').insert(storeRiskToDb(newRisk, projectId, userId))
           if (error) throw new Error(error.message)
-        })
+        }, () => set({ projects: prev }))
       },
 
       updateRisk(projectId, riskId, patch) {
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
@@ -1061,10 +1114,11 @@ export const useAppStore = create<AppStore>()(
           const risk = project?.risks.find((r) => r.id === riskId)
           if (!risk) return
           await dbSyncRisk(projectId, risk, getUserId())
-        })
+        }, () => set({ projects: prev }))
       },
 
       deleteRisk(projectId, riskId) {
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
@@ -1074,11 +1128,12 @@ export const useAppStore = create<AppStore>()(
         sync(async () => {
           const { error } = await supabase.from('risks').delete().eq('id', riskId)
           if (error) throw new Error(error.message)
-        })
+        }, () => set({ projects: prev }))
       },
 
       addActionTask(projectId, riskId, task) {
         const id = uuid()
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
@@ -1090,10 +1145,11 @@ export const useAppStore = create<AppStore>()(
           const risk = project?.risks.find((r) => r.id === riskId)
           if (!risk) return
           await dbSyncRisk(projectId, risk, getUserId())
-        })
+        }, () => set({ projects: prev }))
       },
 
       updateActionTask(projectId, riskId, taskId, patch) {
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
@@ -1105,10 +1161,11 @@ export const useAppStore = create<AppStore>()(
           const risk = project?.risks.find((r) => r.id === riskId)
           if (!risk) return
           await dbSyncRisk(projectId, risk, getUserId())
-        })
+        }, () => set({ projects: prev }))
       },
 
       toggleActionTask(projectId, riskId, taskId) {
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
@@ -1120,10 +1177,11 @@ export const useAppStore = create<AppStore>()(
           const risk = project?.risks.find((r) => r.id === riskId)
           if (!risk) return
           await dbSyncRisk(projectId, risk, getUserId())
-        })
+        }, () => set({ projects: prev }))
       },
 
       deleteActionTask(projectId, riskId, taskId) {
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
@@ -1135,12 +1193,13 @@ export const useAppStore = create<AppStore>()(
           const risk = project?.risks.find((r) => r.id === riskId)
           if (!risk) return
           await dbSyncRisk(projectId, risk, getUserId())
-        })
+        }, () => set({ projects: prev }))
       },
 
       addDelayLogEntry(projectId, entry) {
         const id = uuid()
         const newEntry: DelayLogEntry = { ...entry, id }
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
@@ -1151,10 +1210,11 @@ export const useAppStore = create<AppStore>()(
           const userId = getUserId()
           const { error } = await supabase.from('delay_log').insert(storeDelayLogToDb(newEntry, projectId, userId))
           if (error) throw new Error(error.message)
-        })
+        }, () => set({ projects: prev }))
       },
 
       updateDelayLogEntry(projectId, entryId, patch) {
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
@@ -1180,10 +1240,11 @@ export const useAppStore = create<AppStore>()(
             })
             .eq('id', entryId)
           if (error) throw new Error(error.message)
-        })
+        }, () => set({ projects: prev }))
       },
 
       deleteDelayLogEntry(projectId, entryId) {
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
@@ -1193,7 +1254,7 @@ export const useAppStore = create<AppStore>()(
         sync(async () => {
           const { error } = await supabase.from('delay_log').delete().eq('id', entryId)
           if (error) throw new Error(error.message)
-        })
+        }, () => set({ projects: prev }))
       },
 
       setColumnVisibility(projectId, visibility) {
@@ -1210,6 +1271,7 @@ export const useAppStore = create<AppStore>()(
 
       addTeamMember(projectId, member) {
         const id = uuid()
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
@@ -1220,10 +1282,11 @@ export const useAppStore = create<AppStore>()(
           const project = get().projects.find((p) => p.id === projectId)
           if (!project) return
           await dbSyncProjectRow(project, getUserId())
-        })
+        }, () => set({ projects: prev }))
       },
 
       updateTeamMember(projectId, memberId, patch) {
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
@@ -1234,10 +1297,11 @@ export const useAppStore = create<AppStore>()(
           const project = get().projects.find((p) => p.id === projectId)
           if (!project) return
           await dbSyncProjectRow(project, getUserId())
-        })
+        }, () => set({ projects: prev }))
       },
 
       removeTeamMember(projectId, memberId) {
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
@@ -1248,13 +1312,14 @@ export const useAppStore = create<AppStore>()(
           const project = get().projects.find((p) => p.id === projectId)
           if (!project) return
           await dbSyncProjectRow(project, getUserId())
-        })
+        }, () => set({ projects: prev }))
       },
 
       // ── Project links ─────────────────────────────────────────────────────
 
       addProjectLink(projectId, link) {
         const id = uuid()
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
@@ -1265,10 +1330,11 @@ export const useAppStore = create<AppStore>()(
           const project = get().projects.find((p) => p.id === projectId)
           if (!project) return
           await dbSyncProjectRow(project, getUserId())
-        })
+        }, () => set({ projects: prev }))
       },
 
       removeProjectLink(projectId, linkId) {
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
@@ -1279,13 +1345,14 @@ export const useAppStore = create<AppStore>()(
           const project = get().projects.find((p) => p.id === projectId)
           if (!project) return
           await dbSyncProjectRow(project, getUserId())
-        })
+        }, () => set({ projects: prev }))
       },
 
       // ── Entry links ───────────────────────────────────────────────────────
 
       addEntryLink(projectId, entryId, link) {
         const linkId = uuid()
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
@@ -1304,10 +1371,11 @@ export const useAppStore = create<AppStore>()(
           const project = get().projects.find((p) => p.id === projectId)
           if (!project) return
           await dbSyncEntry(project, entryId, getUserId())
-        })
+        }, () => set({ projects: prev }))
       },
 
       removeEntryLink(projectId, entryId, linkId) {
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
@@ -1326,7 +1394,7 @@ export const useAppStore = create<AppStore>()(
           const project = get().projects.find((p) => p.id === projectId)
           if (!project) return
           await dbSyncEntry(project, entryId, getUserId())
-        })
+        }, () => set({ projects: prev }))
       },
 
       // ── Comments ──────────────────────────────────────────────────────────
@@ -1334,6 +1402,7 @@ export const useAppStore = create<AppStore>()(
       addComment(projectId, entryId, comment) {
         const id = uuid()
         const newComment: EntryComment = { ...comment, id }
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
@@ -1360,10 +1429,11 @@ export const useAppStore = create<AppStore>()(
             created_at: newComment.createdAt,
           })
           if (error) throw new Error(error.message)
-        })
+        }, () => set({ projects: prev }))
       },
 
       removeComment(projectId, entryId, commentId) {
+        const prev = get().projects
         set((s) => ({
           projects: mutateProject(s.projects, projectId, (p) => ({
             ...p,
@@ -1381,17 +1451,18 @@ export const useAppStore = create<AppStore>()(
         sync(async () => {
           const { error } = await supabase.from('comments').delete().eq('id', commentId)
           if (error) throw new Error(error.message)
-        })
+        }, () => set({ projects: prev }))
       },
 
       // ── Settings ──────────────────────────────────────────────────────────
 
       updateSettings(patch) {
+        const prev = get().settings
         set((s) => ({ settings: { ...s.settings, ...patch } }))
         const globalKeys: (keyof AppSettings)[] = ['holidays', 'holidayNames', 'defaultLanguage', 'dateFormat', 'workdays', 'clients']
         const hasGlobal = (Object.keys(patch) as (keyof AppSettings)[]).some((k) => globalKeys.includes(k))
         if (hasGlobal) {
-          sync(async () => syncGlobalSettings(get().settings, getUserId()))
+          sync(async () => syncGlobalSettings(get().settings, getUserId()), () => set({ settings: prev }))
         }
       },
 
@@ -1405,6 +1476,7 @@ export const useAppStore = create<AppStore>()(
       },
 
       addHoliday(date, name) {
+        const prev = get().settings
         set((s) => {
           if (s.settings.holidays.includes(date)) return s
           const holidayNames = name
@@ -1418,10 +1490,11 @@ export const useAppStore = create<AppStore>()(
             },
           }
         })
-        sync(async () => syncGlobalSettings(get().settings, getUserId()))
+        sync(async () => syncGlobalSettings(get().settings, getUserId()), () => set({ settings: prev }))
       },
 
       removeHoliday(date) {
+        const prev = get().settings
         set((s) => {
           const { [date]: _removed, ...holidayNames } = s.settings.holidayNames
           return {
@@ -1432,23 +1505,25 @@ export const useAppStore = create<AppStore>()(
             },
           }
         })
-        sync(async () => syncGlobalSettings(get().settings, getUserId()))
+        sync(async () => syncGlobalSettings(get().settings, getUserId()), () => set({ settings: prev }))
       },
 
       addClient(name) {
+        const prev = get().settings
         set((s) => {
           const trimmed = name.trim()
           if (!trimmed || s.settings.clients.includes(trimmed)) return s
           return { settings: { ...s.settings, clients: [...s.settings.clients, trimmed].sort() } }
         })
-        sync(async () => syncGlobalSettings(get().settings, getUserId()))
+        sync(async () => syncGlobalSettings(get().settings, getUserId()), () => set({ settings: prev }))
       },
 
       removeClient(name) {
+        const prev = get().settings
         set((s) => ({
           settings: { ...s.settings, clients: s.settings.clients.filter((c) => c !== name) },
         }))
-        sync(async () => syncGlobalSettings(get().settings, getUserId()))
+        sync(async () => syncGlobalSettings(get().settings, getUserId()), () => set({ settings: prev }))
       },
     }),
     {

@@ -393,7 +393,7 @@ export function storeProjectToDb(project: Project, userId: string): DbProjectFla
     charter: project.charter ? storeCharterToDb(project.charter) : null,
     team: project.team.length > 0 ? project.team.map(storeTeamMemberToDb) : null,
     links: project.links.length > 0 ? project.links.map(storeLinkToDb) : null,
-    archived: null,
+    archived: project.archived ?? false,
     created_at: now,
     created_by: userId,
     updated_at: now,

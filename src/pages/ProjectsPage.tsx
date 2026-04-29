@@ -571,7 +571,7 @@ function NewProjectModal({ open, onClose, clients, members, templates, onCreate 
 export default function ProjectsPage() {
   const { t } = useTranslation()
   const navigate = useNavigate()
-  const { projects, settings, createProject, archivedProjects, archivedProjectsLoaded, loadArchivedProjects } = useAppStore()
+  const { projects, projectsLoading, settings, createProject, archivedProjects, archivedProjectsLoaded, loadArchivedProjects } = useAppStore()
 
   const [view, setView] = useState<'list' | 'kanban'>(() =>
     (localStorage.getItem('pb-portfolio-view') as 'list' | 'kanban') ?? 'list',
@@ -641,14 +641,39 @@ export default function ProjectsPage() {
       </div>
 
       {/* Filters */}
-      {projects.length > 0 && (
+      {!projectsLoading && projects.length > 0 && (
         <div className="mb-5">
           <FilterBar filters={filters} setFilters={setFilters} clients={clients} pms={pms} />
         </div>
       )}
 
-      {/* Empty state (no projects at all) */}
-      {projects.length === 0 ? (
+      {/* Loading skeleton */}
+      {projectsLoading ? (
+        <div className="overflow-x-auto rounded-xl border border-[var(--border-default)] shadow-sm bg-[var(--surface-card)]">
+          <table className="w-full text-sm">
+            <thead className="bg-[var(--surface-subtle)] border-b border-[var(--border-default)]">
+              <tr>
+                {Array.from({ length: 8 }).map((_, i) => (
+                  <th key={i} className="px-4 py-3">
+                    <div className="h-3 rounded bg-[var(--border-default)] animate-pulse" style={{ width: i === 0 ? '120px' : '60px' }} />
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[var(--border-default)]">
+              {Array.from({ length: 5 }).map((_, row) => (
+                <tr key={row}>
+                  {Array.from({ length: 8 }).map((_, col) => (
+                    <td key={col} className="px-4 py-3">
+                      <div className="h-4 rounded bg-[var(--surface-subtle)] animate-pulse" style={{ width: col === 0 ? '140px' : col === 6 ? '70px' : '80px' }} />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : projects.length === 0 ? (
         <div className="text-center py-24 text-[var(--text-tertiary)]">
           <div className="text-6xl mb-4">🗂️</div>
           <h2 className="text-lg font-semibold text-[var(--text-secondary)] mb-1">{t('project.noProjectsTitle')}</h2>

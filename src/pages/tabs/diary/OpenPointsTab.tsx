@@ -39,6 +39,53 @@ function emptyForm(): OpForm {
   return { title: '', description: '', priority: 'medium', responsible: '', dueDate: '', linkedEntryId: '' }
 }
 
+interface OpFormFieldsProps {
+  form: OpForm
+  set: <K extends keyof OpForm>(k: K, v: OpForm[K]) => void
+  allEntries: { id: string; name: string }[]
+}
+
+function OpFormFields({ form, set, allEntries }: OpFormFieldsProps) {
+  const { t } = useTranslation()
+  return (
+    <div className="space-y-4">
+      <Field label={t('diary.opTitle')} required>
+        <Input autoFocus value={form.title} onChange={(e) => set('title', e.target.value)} />
+      </Field>
+      <Field label={t('diary.opDescription')}>
+        <textarea
+          value={form.description}
+          onChange={(e) => set('description', e.target.value)}
+          rows={3}
+          className="block w-full rounded-md border px-3 py-2 text-sm focus:outline-none focus:ring-1"
+          style={{ borderColor: 'var(--border-default)', background: 'var(--surface-input)', color: 'var(--text-primary)', resize: 'none' }}
+        />
+      </Field>
+      <div className="grid grid-cols-2 gap-4">
+        <Field label={t('diary.opPriority')}>
+          <Select value={form.priority} onChange={(e) => set('priority', e.target.value as OpenPointPriority)}>
+            <option value="low">{t('diary.priorityLow')}</option>
+            <option value="medium">{t('diary.priorityMedium')}</option>
+            <option value="high">{t('diary.priorityHigh')}</option>
+          </Select>
+        </Field>
+        <Field label={t('diary.opResponsible')}>
+          <Input value={form.responsible} onChange={(e) => set('responsible', e.target.value)} />
+        </Field>
+        <Field label={t('diary.opDueDate')}>
+          <Input type="date" value={form.dueDate} onChange={(e) => set('dueDate', e.target.value)} />
+        </Field>
+        <Field label={t('diary.opLinkedEntry')}>
+          <Select value={form.linkedEntryId} onChange={(e) => set('linkedEntryId', e.target.value)}>
+            <option value="">—</option>
+            {allEntries.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+          </Select>
+        </Field>
+      </div>
+    </div>
+  )
+}
+
 export default function OpenPointsTab({ projectId, openPoints, phases }: Props) {
   const { t } = useTranslation()
   const { addOpenPoint, updateOpenPoint, resolveOpenPoint, deleteOpenPoint, addDiaryAttachment, removeDiaryAttachment } = useAppStore()
@@ -128,46 +175,6 @@ export default function OpenPointsTab({ projectId, openPoints, phases }: Props) 
   }), [openPoints])
 
   const drawerItem = drawerOp ? openPoints.find((op) => op.id === drawerOp.id) ?? drawerOp : null
-
-  function OpFormFields() {
-    return (
-      <div className="space-y-4">
-        <Field label={t('diary.opTitle')} required>
-          <Input autoFocus value={form.title} onChange={(e) => set('title', e.target.value)} />
-        </Field>
-        <Field label={t('diary.opDescription')}>
-          <textarea
-            value={form.description}
-            onChange={(e) => set('description', e.target.value)}
-            rows={3}
-            className="block w-full rounded-md border px-3 py-2 text-sm focus:outline-none focus:ring-1"
-            style={{ borderColor: 'var(--border-default)', background: 'var(--surface-input)', color: 'var(--text-primary)', resize: 'none' }}
-          />
-        </Field>
-        <div className="grid grid-cols-2 gap-4">
-          <Field label={t('diary.opPriority')}>
-            <Select value={form.priority} onChange={(e) => set('priority', e.target.value as OpenPointPriority)}>
-              <option value="low">{t('diary.priorityLow')}</option>
-              <option value="medium">{t('diary.priorityMedium')}</option>
-              <option value="high">{t('diary.priorityHigh')}</option>
-            </Select>
-          </Field>
-          <Field label={t('diary.opResponsible')}>
-            <Input value={form.responsible} onChange={(e) => set('responsible', e.target.value)} />
-          </Field>
-          <Field label={t('diary.opDueDate')}>
-            <Input type="date" value={form.dueDate} onChange={(e) => set('dueDate', e.target.value)} />
-          </Field>
-          <Field label={t('diary.opLinkedEntry')}>
-            <Select value={form.linkedEntryId} onChange={(e) => set('linkedEntryId', e.target.value)}>
-              <option value="">—</option>
-              {allEntries.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
-            </Select>
-          </Field>
-        </div>
-      </div>
-    )
-  }
 
   return (
     <div>
@@ -298,7 +305,7 @@ export default function OpenPointsTab({ projectId, openPoints, phases }: Props) 
           </>
         }
       >
-        <OpFormFields />
+        <OpFormFields form={form} set={set} allEntries={allEntries} />
       </Modal>
 
       {/* Edit Modal */}
@@ -314,7 +321,7 @@ export default function OpenPointsTab({ projectId, openPoints, phases }: Props) 
           </>
         }
       >
-        <OpFormFields />
+        <OpFormFields form={form} set={set} allEntries={allEntries} />
       </Modal>
 
       {/* Resolve Modal */}

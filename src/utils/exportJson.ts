@@ -93,6 +93,15 @@ function projectToExportShape(project: Project) {
         }))
       : undefined,
     delayLog: project.delayLog.length > 0 ? project.delayLog : undefined,
+    openPoints: project.openPoints && project.openPoints.length > 0
+      ? project.openPoints.map(({ attachments: _a, ...op }) => op)
+      : undefined,
+    meetings: project.meetings && project.meetings.length > 0
+      ? project.meetings.map(({ attachments: _a, ...m }) => m)
+      : undefined,
+    history: project.history && project.history.length > 0
+      ? project.history
+      : undefined,
   }
 }
 

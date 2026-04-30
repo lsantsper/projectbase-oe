@@ -23,8 +23,9 @@ import DelayLogPage from './DelayLogPage'
 import OverviewTab from './tabs/OverviewTab'
 import CharterTab from './tabs/CharterTab'
 import TeamTab from './tabs/TeamTab'
+import DiaryTab from './tabs/DiaryTab'
 
-const TAB_IDS = ['overview', 'charter', 'team', 'plan', 'kanban', 'risks', 'delayLog'] as const
+const TAB_IDS = ['overview', 'charter', 'team', 'plan', 'kanban', 'risks', 'delayLog', 'diary'] as const
 type TabId = typeof TAB_IDS[number]
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
@@ -581,6 +582,11 @@ export default function ProjectDetailPage() {
               {tid === 'team' && project.team.length > 0 && (
                 <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'var(--surface-subtle)', color: 'var(--text-tertiary)' }}>{project.team.length}</span>
               )}
+              {tid === 'diary' && (project.openPoints?.filter((op) => op.status === 'open').length ?? 0) > 0 && (
+                <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'var(--color-warning-bg, #fffbeb)', color: 'var(--color-warning-text, #d97706)' }}>
+                  {project.openPoints!.filter((op) => op.status === 'open').length}
+                </span>
+              )}
             </button>
           ))}
         </nav>
@@ -595,6 +601,7 @@ export default function ProjectDetailPage() {
         {tab === 'kanban'    && <KanbanPage projectId={project.id} />}
         {tab === 'risks'     && <RisksPage projectId={project.id} focusRiskId={focusRiskId} onFocusConsumed={() => setFocusRiskId(null)} />}
         {tab === 'delayLog'  && <DelayLogPage projectId={project.id} />}
+        {tab === 'diary'     && <DiaryTab project={project} />}
       </div>
 
       {showReportModal && (

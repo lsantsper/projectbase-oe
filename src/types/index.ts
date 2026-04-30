@@ -103,6 +103,96 @@ export interface TeamMember {
   name: string
   role: string
   email?: string
+  userId?: string
+}
+
+export interface DiaryComment {
+  id: string
+  author: string
+  text: string
+  createdAt: string
+}
+
+export interface FileAttachment {
+  id: string
+  name: string
+  url: string
+  size?: number
+  uploadedAt: string
+  uploadedBy?: string
+}
+
+export type OpenPointStatus = 'open' | 'resolved'
+export type OpenPointPriority = 'low' | 'medium' | 'high'
+
+export interface OpenPoint {
+  id: string
+  title: string
+  description?: string
+  status: OpenPointStatus
+  priority: OpenPointPriority
+  responsible?: string
+  dueDate?: string
+  resolvedAt?: string
+  resolvedBy?: string
+  resolution?: string
+  linkedEntryId?: string
+  comments: DiaryComment[]
+  attachments: FileAttachment[]
+  createdAt: string
+  createdBy?: string
+}
+
+export interface MeetingItem {
+  id: string
+  text: string
+  done: boolean
+  type: 'action' | 'decision' | 'info'
+  responsible?: string
+  dueDate?: string
+  promotedToOpenPointId?: string
+  promotedToEntryId?: string
+}
+
+export interface MeetingLog {
+  id: string
+  title: string
+  date: string
+  durationMinutes?: number
+  location?: string
+  attendees?: string
+  objective?: string
+  notes?: string
+  linkedEntryId?: string
+  items: MeetingItem[]
+  comments: DiaryComment[]
+  attachments: FileAttachment[]
+  createdAt: string
+  createdBy?: string
+}
+
+export type HistoryEventType =
+  | 'project_created'
+  | 'status_changed'
+  | 'baseline_set'
+  | 'risk_added'
+  | 'delay_logged'
+  | 'member_added'
+  | 'meeting_held'
+  | 'open_point_resolved'
+  | 'note'
+
+export interface HistoryEntry {
+  id: string
+  event: HistoryEventType
+  title: string
+  detail?: string
+  linkedId?: string
+  linkedType?: 'entry' | 'risk' | 'meeting' | 'open_point'
+  isManualNote?: boolean
+  comments: DiaryComment[]
+  createdAt: string
+  createdBy?: string
 }
 
 export interface ProjectCharter {
@@ -140,6 +230,9 @@ export interface Project {
   links: Link[]
   overview?: string
   charter?: ProjectCharter
+  openPoints?: OpenPoint[]
+  meetings?: MeetingLog[]
+  history?: HistoryEntry[]
 }
 
 // Template structures

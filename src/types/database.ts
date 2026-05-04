@@ -147,6 +147,8 @@ export interface DbEntry {
   parent_entry_id: string | null
   subtasks: DbSubtaskJson[] | null    // JSONB
   links: DbLink[] | null              // JSONB
+  owners: any[] | null                // JSONB — EntryOwner[]
+  hidden_from_plan: boolean | null
   created_at: string | null
   created_by: string | null
   updated_at: string | null

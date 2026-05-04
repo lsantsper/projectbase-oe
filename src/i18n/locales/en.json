@@ -163,7 +163,28 @@
     "isCritical": "Critical",
     "riskFlag": "Risk",
     "addEntry": "Add entry",
-    "addSubtask": "Add subtask"
+    "addSubtask": "Add subtask",
+    "newTask": "New Task",
+    "newMilestone": "New Milestone",
+    "newMeeting": "New Meeting",
+    "editTask": "Edit Task",
+    "editMilestone": "Edit Milestone",
+    "editMeeting": "Edit Meeting",
+    "saveChanges": "Save changes",
+    "deleteEntry": "Delete entry",
+    "confirmDelete": "Confirm delete?",
+    "hasDependents": "{{count}} entr(y/ies) depend(s) on this. Dependencies will be removed automatically.",
+    "moveToPhase": "Entry will be moved to \"{{phase}}\"",
+    "owners": "Owners",
+    "addOwner": "Add owner",
+    "fromTeam": "From team",
+    "freeText": "Free text",
+    "showInPlan": "Show in plan",
+    "hiddenFromPlan": "Hidden from plan",
+    "subtaskOf": "Subtask of",
+    "comments": "Comments",
+    "noComments": "No comments yet.",
+    "commentPlaceholder": "Add a comment..."
   },
   "plan": {
     "addTask": "+ Task",
@@ -331,7 +352,10 @@
     "exportCsv": "Export CSV",
     "columns": "Columns",
     "emptyTitle": "No assigned tasks",
-    "emptySubtitle": "Assign tasks to team members in the project plan"
+    "emptySubtitle": "Assign tasks to team members in the project plan",
+    "newTask": "New Task",
+    "selectProject": "Select project",
+    "selectPhase": "Select phase"
   },
   "report": {
     "exportBtn": "Export report",

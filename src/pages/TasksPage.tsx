@@ -8,7 +8,10 @@ import {
 } from '@dnd-kit/core'
 import { CSS } from '@dnd-kit/utilities'
 import { useAppStore } from '@/store/useAppStore'
-import { Entry, EntryStatus, Project } from '@/types'
+import { Entry, EntryOwner, EntryStatus, EntryType, Phase, Project } from '@/types'
+import { Modal } from '@/components/ui/Modal'
+import { Button } from '@/components/ui/Button'
+import { Input, Select, Field } from '@/components/ui/Input'
 
 // ─── constants ────────────────────────────────────────────────────────────────
 
@@ -54,18 +57,28 @@ function initials(name: string): string {
     : name.slice(0, 2).toUpperCase()
 }
 
+function entryOwners(entry: Entry): EntryOwner[] {
+  if (entry.owners && entry.owners.length > 0) return entry.owners
+  if (entry.responsible) return [{ id: entry.responsible, type: 'text', name: entry.responsible }]
+  return []
+}
+
 function buildCards(projects: Project[]): GlobalCard[] {
   const cards: GlobalCard[] = []
   for (let i = 0; i < projects.length; i++) {
     const proj = projects[i]
+    if (proj.archived) continue
     const color = projectColor(proj, i)
     for (const ph of proj.phases) {
       for (const entry of ph.entries) {
-        if ((entry.type === 'task' || entry.type === 'meeting') && entry.responsibleMemberId) {
+        if (entry.hiddenFromPlan) continue
+        const owners = entryOwners(entry)
+        if ((entry.type === 'task' || entry.type === 'meeting') && owners.length > 0) {
           cards.push({ ...entry, _projectId: proj.id, _projectName: proj.name, _projectColor: color })
         }
         for (const sub of entry.subtasks) {
-          if ((sub.type === 'task' || sub.type === 'meeting') && sub.responsibleMemberId) {
+          const subOwners = entryOwners(sub)
+          if ((sub.type === 'task' || sub.type === 'meeting') && subOwners.length > 0) {
             cards.push({ ...sub, _projectId: proj.id, _projectName: proj.name, _projectColor: color })
           }
         }
@@ -73,6 +86,43 @@ function buildCards(projects: Project[]): GlobalCard[] {
     }
   }
   return cards
+}
+
+// ─── OwnerAvatars ─────────────────────────────────────────────────────────────
+
+function OwnerAvatars({ entry }: { entry: Entry }) {
+  const owners = entryOwners(entry)
+  if (owners.length === 0) return null
+  const MAX = 3
+  const visible = owners.slice(0, MAX)
+  const overflow = owners.length - MAX
+  const tooltip = owners.map((o) => o.name).join(', ')
+
+  return (
+    <div className="flex items-center" title={tooltip}>
+      {visible.map((owner, i) => (
+        <span
+          key={owner.id}
+          className="flex items-center justify-center"
+          style={{
+            width: 22, height: 22, borderRadius: '50%',
+            background: 'var(--oe-primary)', color: 'white',
+            fontSize: 9, fontWeight: 600,
+            marginLeft: i > 0 ? -7 : 0,
+            border: '1.5px solid var(--surface-card)',
+            zIndex: MAX - i,
+            position: 'relative',
+            flexShrink: 0,
+          }}
+        >
+          {initials(owner.name)}
+        </span>
+      ))}
+      {overflow > 0 && (
+        <span className="ml-1" style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>+{overflow}</span>
+      )}
+    </div>
+  )
 }
 
 // ─── TaskCard ─────────────────────────────────────────────────────────────────
@@ -85,6 +135,8 @@ function TaskCard({ card, onClick, ghost = false }: {
   const today = new Date().toISOString().split('T')[0]
   const endDate = card.type === 'task' ? card.plannedEnd : card.plannedDate
   const isOverdue = endDate && endDate < today && card.status !== 'done'
+  const hasLinks = card.links.length > 0
+  const hasComments = card.comments.length > 0
 
   return (
     <div
@@ -105,6 +157,12 @@ function TaskCard({ card, onClick, ghost = false }: {
         <span className="truncate flex-1" style={{ fontSize: 10, color: 'var(--text-tertiary)', fontWeight: 500 }}>
           {card._projectName}
         </span>
+        {hasComments && (
+          <span style={{ fontSize: 10, color: 'var(--text-disabled)' }}>💬{card.comments.length}</span>
+        )}
+        {hasLinks && (
+          <span style={{ fontSize: 10, color: 'var(--text-disabled)' }}>🔗{card.links.length}</span>
+        )}
         {card.riskFlag !== 'none' && (
           <span style={{
             display: 'inline-block', width: 7, height: 7, borderRadius: 1, flexShrink: 0,
@@ -118,14 +176,9 @@ function TaskCard({ card, onClick, ghost = false }: {
         {card.name}
       </p>
 
-      {/* Footer: avatar + date */}
+      {/* Footer: owner avatars + date */}
       <div className="flex items-center justify-between gap-2">
-        <div
-          className="flex items-center justify-center shrink-0"
-          style={{ width: 24, height: 24, borderRadius: 'var(--radius-pill)', background: 'var(--oe-primary)', color: 'white', fontSize: 9, fontWeight: 600 }}
-        >
-          {initials(card.responsible)}
-        </div>
+        <OwnerAvatars entry={card} />
         {endDate && (
           <span style={{ fontSize: 11, color: isOverdue ? 'var(--color-danger-text)' : 'var(--text-tertiary)' }}>
             {fmtDate(endDate)}
@@ -197,7 +250,7 @@ function KanbanColumn({ status, labelKey, cards, onCardClick }: {
 
 // ─── EmptyState ───────────────────────────────────────────────────────────────
 
-function EmptyState() {
+function EmptyState({ onNew }: { onNew: () => void }) {
   const { t } = useTranslation()
   return (
     <div className="flex flex-col items-center justify-center flex-1 py-24">
@@ -211,11 +264,20 @@ function EmptyState() {
       <p style={{ fontSize: 13, color: 'var(--text-tertiary)', textAlign: 'center', maxWidth: 320 }}>
         {t('tasks.emptySubtitle')}
       </p>
+      <button
+        onClick={onNew}
+        className="mt-6 px-4 py-2 rounded-lg text-sm font-medium transition-opacity"
+        style={{ background: 'var(--oe-primary)', color: 'white' }}
+        onMouseEnter={e => (e.currentTarget.style.opacity = '0.85')}
+        onMouseLeave={e => (e.currentTarget.style.opacity = '1')}
+      >
+        {t('tasks.newTask')}
+      </button>
     </div>
   )
 }
 
-// ─── Filter select ────────────────────────────────────────────────────────────
+// ─── FilterSelect ─────────────────────────────────────────────────────────────
 
 function FilterSelect({ value, onChange, children }: {
   value: string
@@ -234,6 +296,201 @@ function FilterSelect({ value, onChange, children }: {
   )
 }
 
+// ─── NewTaskModal ─────────────────────────────────────────────────────────────
+
+type NewTaskForm = {
+  name: string
+  projectId: string
+  phaseId: string
+  parentTaskId: string
+  plannedStart: string
+  plannedEnd: string
+  showInPlan: boolean
+}
+
+function NewTaskModal({ open, projects, onClose }: {
+  open: boolean
+  projects: Project[]
+  onClose: () => void
+}) {
+  const { t } = useTranslation()
+  const { addEntry, addSubtask } = useAppStore()
+
+  const activeProjects = useMemo(() => projects.filter((p) => !p.archived), [projects])
+
+  const [form, setForm] = useState<NewTaskForm>({
+    name: '',
+    projectId: activeProjects[0]?.id ?? '',
+    phaseId: '',
+    parentTaskId: '',
+    plannedStart: '',
+    plannedEnd: '',
+    showInPlan: true,
+  })
+  const [endError, setEndError] = useState('')
+
+  function set<K extends keyof NewTaskForm>(k: K, v: NewTaskForm[K]) {
+    setForm((f) => {
+      const next = { ...f, [k]: v }
+      if (k === 'projectId') {
+        const proj = projects.find((p) => p.id === v)
+        next.phaseId = proj?.phases[0]?.id ?? ''
+        next.parentTaskId = ''
+      }
+      if (k === 'phaseId') next.parentTaskId = ''
+      return next
+    })
+  }
+
+  const selectedProject = useMemo(
+    () => projects.find((p) => p.id === form.projectId),
+    [projects, form.projectId],
+  )
+
+  const selectedPhase = useMemo(
+    () => selectedProject?.phases.find((ph) => ph.id === form.phaseId),
+    [selectedProject, form.phaseId],
+  )
+
+  const parentTasks = useMemo(
+    () => (selectedPhase?.entries ?? []).filter((e) => e.type === 'task'),
+    [selectedPhase],
+  )
+
+  // Reset when modal opens
+  useState(() => {
+    if (!open) return
+    const proj = activeProjects[0]
+    setForm({
+      name: '',
+      projectId: proj?.id ?? '',
+      phaseId: proj?.phases[0]?.id ?? '',
+      parentTaskId: '',
+      plannedStart: '',
+      plannedEnd: '',
+      showInPlan: true,
+    })
+    setEndError('')
+  })
+
+  function handleSave() {
+    if (!form.name.trim() || !form.projectId || !form.phaseId) return
+    if (form.plannedStart && form.plannedEnd && form.plannedEnd < form.plannedStart) {
+      setEndError(t('errors.endBeforeStart'))
+      return
+    }
+    setEndError('')
+
+    const base: Omit<Entry, 'id' | 'isCritical' | 'comments' | 'links' | 'subtasks'> = {
+      name: form.name.trim(),
+      type: 'task',
+      responsible: '',
+      owners: [],
+      dependsOn: [],
+      riskFlag: 'none',
+      status: 'pending',
+      order: 0,
+      plannedStart: form.plannedStart || undefined,
+      plannedEnd: form.plannedEnd || undefined,
+      hiddenFromPlan: !form.showInPlan || undefined,
+    }
+
+    if (form.parentTaskId) {
+      addSubtask(form.projectId, form.phaseId, form.parentTaskId, base)
+    } else {
+      addEntry(form.projectId, form.phaseId, base)
+    }
+    onClose()
+  }
+
+  return (
+    <Modal
+      open={open}
+      title={t('tasks.newTask')}
+      onClose={onClose}
+      size="md"
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>{t('actions.cancel')}</Button>
+          <Button onClick={handleSave} disabled={!form.name.trim() || !form.phaseId}>
+            {t('actions.confirm')}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        <Field label={t('entry.name')} required>
+          <Input
+            autoFocus
+            value={form.name}
+            onChange={(e) => set('name', e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleSave()}
+          />
+        </Field>
+
+        <Field label={t('tasks.selectProject')} required>
+          <Select value={form.projectId} onChange={(e) => set('projectId', e.target.value)}>
+            {activeProjects.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </Select>
+        </Field>
+
+        <Field label={t('tasks.selectPhase')} required>
+          <Select
+            value={form.phaseId}
+            onChange={(e) => set('phaseId', e.target.value)}
+            disabled={!selectedProject}
+          >
+            <option value="">—</option>
+            {(selectedProject?.phases ?? []).map((ph: Phase) => (
+              <option key={ph.id} value={ph.id}>{ph.name}</option>
+            ))}
+          </Select>
+        </Field>
+
+        {parentTasks.length > 0 && (
+          <Field label={t('entry.subtaskOf')}>
+            <Select value={form.parentTaskId} onChange={(e) => set('parentTaskId', e.target.value)}>
+              <option value="">— {t('plan.linkedTaskNone')} —</option>
+              {parentTasks.map((task) => (
+                <option key={task.id} value={task.id}>{task.name}</option>
+              ))}
+            </Select>
+          </Field>
+        )}
+
+        <div className="grid grid-cols-2 gap-4">
+          <Field label={t('entry.plannedStart')}>
+            <Input type="date" value={form.plannedStart} onChange={(e) => set('plannedStart', e.target.value)} />
+          </Field>
+          <Field label={t('entry.plannedEnd')}>
+            <Input
+              type="date"
+              value={form.plannedEnd}
+              onChange={(e) => { set('plannedEnd', e.target.value); setEndError('') }}
+              className={endError ? 'border-red-500' : ''}
+            />
+            {endError && <p className="text-xs text-red-500 mt-1">{endError}</p>}
+          </Field>
+        </div>
+
+        <label className="flex items-center gap-2 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={form.showInPlan}
+            onChange={(e) => set('showInPlan', e.target.checked)}
+            className="rounded"
+          />
+          <span className="text-sm" style={{ color: 'var(--text-secondary)' }}>
+            {t('entry.showInPlan')}
+          </span>
+        </label>
+      </div>
+    </Modal>
+  )
+}
+
 // ─── TasksPage ────────────────────────────────────────────────────────────────
 
 export default function TasksPage() {
@@ -245,6 +502,7 @@ export default function TasksPage() {
   const [filterMember, setFilterMember] = useState('')
   const [filterStatus, setFilterStatus] = useState('')
   const [activeId, setActiveId] = useState<string | null>(null)
+  const [newTaskOpen, setNewTaskOpen] = useState(false)
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -263,7 +521,10 @@ export default function TasksPage() {
   const filteredCards = useMemo(() => {
     return allCards.filter((c) => {
       if (filterProject && c._projectId !== filterProject) return false
-      if (filterMember && c.responsible !== filterMember) return false
+      if (filterMember) {
+        const owners = entryOwners(c)
+        if (!owners.some((o) => o.name === filterMember)) return false
+      }
       if (filterStatus && c.status !== filterStatus) return false
       return true
     })
@@ -302,11 +563,16 @@ export default function TasksPage() {
         <span style={{ fontSize: 15, fontWeight: 500, color: 'var(--text-primary)' }}>
           {t('tasks.title')}
         </span>
+
+        <Button size="sm" onClick={() => setNewTaskOpen(true)}>
+          {t('tasks.newTask')}
+        </Button>
+
         <div className="flex-1" />
 
         <FilterSelect value={filterProject} onChange={setFilterProject}>
           <option value="">{t('tasks.filterProject')}</option>
-          {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          {projects.filter((p) => !p.archived).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
         </FilterSelect>
 
         <FilterSelect value={filterMember} onChange={setFilterMember}>
@@ -324,7 +590,7 @@ export default function TasksPage() {
 
       {/* Content */}
       {allCards.length === 0 ? (
-        <EmptyState />
+        <EmptyState onNew={() => setNewTaskOpen(true)} />
       ) : (
         <div className="flex-1 overflow-auto p-6">
           <DndContext
@@ -350,6 +616,12 @@ export default function TasksPage() {
           </DndContext>
         </div>
       )}
+
+      <NewTaskModal
+        open={newTaskOpen}
+        projects={projects}
+        onClose={() => setNewTaskOpen(false)}
+      />
     </div>
   )
 }

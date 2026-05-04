@@ -4,7 +4,7 @@
  */
 
 import type {
-  Project, Phase, Entry, EntryComment, Link, Risk, ActionTask,
+  Project, Phase, Entry, EntryComment, EntryOwner, Link, Risk, ActionTask,
   DelayLogEntry, TeamMember, ProjectCharter, EntryType, EntryStatus,
   RiskFlag, ProjectStatus, ProjectType, AppLanguage,
   DelayResponsibility, DelayType,
@@ -86,6 +86,19 @@ function dbEntryToStore(row: DbEntry, comments: DbComment[]): Entry {
       createdAt: c.created_at ?? new Date().toISOString(),
     }))
 
+  // Migrate owners from responsible/responsibleMemberId if not stored
+  let owners: EntryOwner[] = []
+  if (Array.isArray(row.owners) && row.owners.length > 0) {
+    owners = row.owners as EntryOwner[]
+  } else if (row.responsible) {
+    owners = [{
+      id: row.responsible_member_id ?? row.responsible,
+      type: row.responsible_member_id ? 'member' : 'text',
+      memberId: row.responsible_member_id ?? undefined,
+      name: row.responsible,
+    }]
+  }
+
   return {
     id: row.id,
     type: row.type,
@@ -108,6 +121,8 @@ function dbEntryToStore(row: DbEntry, comments: DbComment[]): Entry {
     statusOverride: row.status_override ?? undefined,
     responsibleMemberId: row.responsible_member_id ?? undefined,
     responsibleMode: row.responsible_member_id ? 'member' : 'free',
+    owners,
+    hiddenFromPlan: row.hidden_from_plan ?? undefined,
     order: row.order ?? 0,
     parentEntryId: row.parent_entry_id ?? undefined,
     comments: entryComments,
@@ -280,8 +295,8 @@ function storeEntryToDb(entry: Entry, phaseId: string, projectId: string, userId
     phase_id: phaseId,
     type: entry.type,
     name: entry.name,
-    responsible: entry.responsible || null,
-    responsible_member_id: entry.responsibleMemberId ?? null,
+    responsible: (entry.owners && entry.owners.length > 0 ? entry.owners[0].name : entry.responsible) || null,
+    responsible_member_id: (entry.owners && entry.owners.length > 0 ? entry.owners.find(o => o.type === 'member')?.memberId : entry.responsibleMemberId) ?? null,
     depends_on: entry.dependsOn.length > 0 ? entry.dependsOn : null,
     is_critical: entry.isCritical,
     planned_start: entry.plannedStart ?? null,
@@ -302,6 +317,8 @@ function storeEntryToDb(entry: Entry, phaseId: string, projectId: string, userId
     order: entry.order,
     subtasks: entry.subtasks.length > 0 ? entry.subtasks.map(storeSubtaskToDb) : null,
     links: entry.links.length > 0 ? entry.links.map(storeLinkToDb) : null,
+    owners: entry.owners && entry.owners.length > 0 ? entry.owners : null,
+    hidden_from_plan: entry.hiddenFromPlan ?? null,
     created_at: now,
     created_by: userId,
     updated_at: now,

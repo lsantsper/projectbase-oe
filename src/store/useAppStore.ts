@@ -137,6 +137,7 @@ interface AppStore {
   addSubtask: (projectId: string, phaseId: string, parentId: string, entry: Omit<Entry, 'id' | 'isCritical' | 'comments' | 'links' | 'subtasks'>) => void
   updateEntry: (projectId: string, entryId: string, patch: Partial<Entry>) => void
   deleteEntry: (projectId: string, phaseId: string, entryId: string) => void
+  moveEntryToPhase: (projectId: string, fromPhaseId: string, toPhaseId: string, entryId: string) => void
   updateEntryStatus: (projectId: string, entryId: string, status: EntryStatus) => void
   resetStatusOverride: (projectId: string, entryId: string) => void
   recalculateStatuses: (projectId: string) => void
@@ -1001,6 +1002,35 @@ export const useAppStore = create<AppStore>()(
               await dbSyncAllEntries(project, userId)
             }
           }
+        }, () => set({ projects: prev }))
+      },
+
+      moveEntryToPhase(projectId, fromPhaseId, toPhaseId, entryId) {
+        if (fromPhaseId === toPhaseId) return
+        const prev = get().projects
+        set((s) => ({
+          projects: mutateProject(s.projects, projectId, (p) => {
+            let movedEntry: Entry | undefined
+            const phases = p.phases.map((ph) => {
+              if (ph.id !== fromPhaseId) return ph
+              const found = ph.entries.find((e) => e.id === entryId)
+              if (found) movedEntry = found
+              return { ...ph, entries: ph.entries.filter((e) => e.id !== entryId) }
+            })
+            if (!movedEntry) return p
+            const entry = movedEntry
+            return refreshCriticalPath({
+              ...p,
+              phases: phases.map((ph) =>
+                ph.id !== toPhaseId ? ph : { ...ph, entries: [...ph.entries, entry] }
+              ),
+            })
+          }),
+        }))
+        sync(async () => {
+          const project = get().projects.find((p) => p.id === projectId)
+          if (!project) return
+          await dbSyncAllEntries(project, getUserId())
         }, () => set({ projects: prev }))
       },
 

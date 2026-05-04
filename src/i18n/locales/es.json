@@ -163,7 +163,28 @@
     "isCritical": "Crítico",
     "riskFlag": "Riesgo",
     "addEntry": "Agregar entrada",
-    "addSubtask": "Agregar subtarea"
+    "addSubtask": "Agregar subtarea",
+    "newTask": "Nueva Tarea",
+    "newMilestone": "Nuevo Hito",
+    "newMeeting": "Nueva Reunión",
+    "editTask": "Editar Tarea",
+    "editMilestone": "Editar Hito",
+    "editMeeting": "Editar Reunión",
+    "saveChanges": "Guardar cambios",
+    "deleteEntry": "Eliminar entrada",
+    "confirmDelete": "¿Confirmar eliminación?",
+    "hasDependents": "{{count}} entrada(s) depende(n) de esta. Las dependencias se eliminarán automáticamente.",
+    "moveToPhase": "La entrada se moverá a \"{{phase}}\"",
+    "owners": "Responsables",
+    "addOwner": "Agregar responsable",
+    "fromTeam": "Del equipo",
+    "freeText": "Texto libre",
+    "showInPlan": "Mostrar en el plan",
+    "hiddenFromPlan": "Oculto del plan",
+    "subtaskOf": "Subtarea de",
+    "comments": "Comentarios",
+    "noComments": "Aún no hay comentarios.",
+    "commentPlaceholder": "Agregar comentario..."
   },
   "plan": {
     "addTask": "+ Tarea",
@@ -331,7 +352,10 @@
     "exportCsv": "Exportar CSV",
     "columns": "Columnas",
     "emptyTitle": "No hay tareas asignadas",
-    "emptySubtitle": "Asigna tareas a miembros del equipo en el plan del proyecto"
+    "emptySubtitle": "Asigna tareas a miembros del equipo en el plan del proyecto",
+    "newTask": "Nueva Tarea",
+    "selectProject": "Seleccionar proyecto",
+    "selectPhase": "Seleccionar fase"
   },
   "report": {
     "exportBtn": "Exportar report",

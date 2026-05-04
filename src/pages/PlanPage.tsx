@@ -4,7 +4,7 @@ import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import {
   useReactTable, getCoreRowModel, getExpandedRowModel,
-  ColumnDef, flexRender, Row,
+  ColumnDef, flexRender, Row, ExpandedState,
 } from '@tanstack/react-table'
 import { parseISO } from 'date-fns'
 import { useAppStore } from '@/store/useAppStore'
@@ -16,6 +16,7 @@ import { Modal } from '@/components/ui/Modal'
 import { Textarea, Field } from '@/components/ui/Input'
 import CommentsPanel from '@/components/plan/CommentsPanel'
 import AddEntryModal from '@/components/plan/AddEntryModal'
+import EntryModal from '@/components/plan/EntryModal'
 import { computeVariance } from '@/utils/dateEngine'
 import { workdaysBetween, parseHolidays } from '@/utils/businessDays'
 import { exportProjectCsv } from '@/utils/exportCsv'
@@ -602,18 +603,16 @@ function TypePill({ type }: { type: EntryType }) {
 
 // ─── NameCell ─────────────────────────────────────────────────────────────────
 
-function NameCell({ entry, depth, projectId, linkedRisk, onSave, onOpenComments, onNavigateToRisk, onChangeRisk }: {
+function NameCell({ entry, depth, projectId, linkedRisk, onOpenComments, onNavigateToRisk, onChangeRisk, onOpenEdit }: {
   entry: Entry
   depth: number
   projectId: string
   linkedRisk?: { id: string }
-  onSave: (v: string) => void
   onOpenComments: () => void
   onNavigateToRisk?: (riskId: string) => void
   onChangeRisk: (f: RiskFlag) => void
+  onOpenEdit: () => void
 }) {
-  const [editing, setEditing] = useState(false)
-  const [draft, setDraft] = useState('')
   const indent = depth * 16
 
   return (
@@ -628,39 +627,24 @@ function NameCell({ entry, depth, projectId, linkedRisk, onSave, onOpenComments,
       <span className={entry.links.length > 0 ? '' : 'opacity-0 group-hover/row:opacity-100 transition-opacity'}>
         <LinksCell entry={entry} projectId={projectId} />
       </span>
-      {editing ? (
-        <input
-          autoFocus
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onBlur={() => { onSave(draft); setEditing(false) }}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') { onSave(draft); setEditing(false) }
-            if (e.key === 'Escape') setEditing(false)
-          }}
-          className="flex-1 min-w-0 bg-transparent outline-none"
-          style={{ fontSize: 12, color: 'var(--text-primary)', borderBottom: '1px solid var(--oe-primary)' }}
-        />
-      ) : (
-        <>
-          <span
-            onClick={() => { setDraft(entry.name); setEditing(true) }}
-            className="flex-1 min-w-0 truncate cursor-text"
-            style={{ fontSize: 12, color: 'var(--text-primary)' }}
-          >
-            {entry.name}
-          </span>
-          <button
-            onClick={() => { setDraft(entry.name); setEditing(true) }}
-            className="opacity-0 group-hover/row:opacity-100 transition-opacity shrink-0"
-            style={{ color: 'var(--text-tertiary)' }}
-          >
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-            </svg>
-          </button>
-        </>
-      )}
+      <span
+        onDoubleClick={onOpenEdit}
+        className="flex-1 min-w-0 truncate cursor-default select-none"
+        style={{ fontSize: 12, color: 'var(--text-primary)' }}
+        title="Duplo clique para editar"
+      >
+        {entry.name}
+      </span>
+      <button
+        onClick={onOpenEdit}
+        className="opacity-0 group-hover/row:opacity-100 transition-opacity shrink-0"
+        style={{ color: 'var(--text-tertiary)' }}
+        title="Editar"
+      >
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+        </svg>
+      </button>
     </div>
   )
 }
@@ -674,161 +658,50 @@ function memberInitials(name: string): string {
     : name.slice(0, 2).toUpperCase()
 }
 
-function ResponsibleCell({ entry, project, projectId }: {
-  entry: Entry
-  project: Project
-  projectId: string
-}) {
-  const { updateEntry } = useAppStore()
-  const { t } = useTranslation()
-  const [open, setOpen] = useState(false)
-  const { triggerRef, popoverRef, position } = useSmartPosition(open)
-  const [mode, setMode] = useState<'member' | 'free'>('free')
-  const [freeText, setFreeText] = useState('')
+function ResponsibleCell({ entry }: { entry: Entry }) {
+  const owners = entry.owners && entry.owners.length > 0
+    ? entry.owners
+    : entry.responsible
+      ? [{ id: entry.responsible, type: 'text' as const, name: entry.responsible }]
+      : []
 
-  useEffect(() => {
-    if (!open) return
-    const handler = (e: MouseEvent) => {
-      if (
-        popoverRef.current && !popoverRef.current.contains(e.target as Node) &&
-        triggerRef.current && !triggerRef.current.contains(e.target as Node)
-      ) setOpen(false)
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [open])
-
-  useEffect(() => {
-    if (!open) return
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
-    document.addEventListener('keydown', handler)
-    return () => document.removeEventListener('keydown', handler)
-  }, [open])
-
-  function openPopover() {
-    setFreeText(entry.responsible)
-    setMode(entry.responsibleMode ?? 'free')
-    setOpen((v) => !v)
+  if (owners.length === 0) {
+    return <span className="opacity-0 group-hover/row:opacity-60 transition-opacity" style={{ fontSize: 11, color: 'var(--text-disabled)' }}>—</span>
   }
 
-  function selectMember(member: TeamMember) {
-    updateEntry(projectId, entry.id, { responsible: member.name, responsibleMemberId: member.id, responsibleMode: 'member' })
-    setOpen(false)
-  }
-
-  function saveFreeText() {
-    updateEntry(projectId, entry.id, { responsible: freeText.trim(), responsibleMemberId: undefined, responsibleMode: 'free' })
-    setOpen(false)
-  }
-
-  const trigger = entry.responsible ? (
-    <button ref={triggerRef as any} onClick={openPopover} className="flex items-center gap-1.5 min-w-0 max-w-full">
-      {entry.responsibleMemberId && (
-        <span
-          className="flex items-center justify-center shrink-0"
-          style={{ width: 18, height: 18, borderRadius: '50%', background: 'var(--oe-primary)', color: 'white', fontSize: 9, fontWeight: 600 }}
-        >
-          {memberInitials(entry.responsible)}
-        </span>
-      )}
-      <span className="truncate" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-        {entry.responsible}
-      </span>
-    </button>
-  ) : (
-    <button
-      ref={triggerRef as any}
-      onClick={openPopover}
-      className="opacity-0 group-hover/row:opacity-100 transition-opacity"
-      style={{ fontSize: 11, color: 'var(--text-disabled)' }}
-    >
-      —
-    </button>
-  )
+  const MAX = 3
+  const visible = owners.slice(0, MAX)
+  const overflow = owners.length - MAX
+  const tooltip = owners.map((o) => o.name).join(', ')
 
   return (
-    <>
-      {trigger}
-      {open && createPortal(
-        <div
-          ref={popoverRef as any}
-          style={{ position: 'fixed', ...position, zIndex: 1000, background: 'var(--surface-card)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-lg)', width: 200 }}
-          className="py-2"
-          onMouseDown={(e) => e.stopPropagation()}
+    <div className="flex items-center gap-1 min-w-0" title={tooltip}>
+      {visible.map((owner, i) => (
+        <span
+          key={owner.id}
+          className="flex items-center justify-center shrink-0"
+          style={{
+            width: 20, height: 20, borderRadius: '50%',
+            background: 'var(--oe-primary)', color: 'white',
+            fontSize: 8, fontWeight: 600,
+            marginLeft: i > 0 ? -6 : 0,
+            border: '1.5px solid var(--surface-card)',
+            zIndex: MAX - i,
+            position: 'relative',
+          }}
         >
-          {/* Mode toggle */}
-          <div className="flex gap-1 px-2 pb-2" style={{ borderBottom: '0.5px solid var(--border-default)' }}>
-            {(['member', 'free'] as const).map((m) => (
-              <button
-                key={m}
-                onClick={() => setMode(m)}
-                className="flex-1 py-1 transition-colors"
-                style={{
-                  fontSize: 11, borderRadius: 'var(--radius-md)',
-                  background: mode === m ? 'var(--oe-primary-light)' : 'transparent',
-                  color: mode === m ? 'var(--oe-primary)' : 'var(--text-tertiary)',
-                  fontWeight: mode === m ? 500 : 400,
-                }}
-              >
-                {t(m === 'member' ? 'tasks.memberMode' : 'tasks.freeMode')}
-              </button>
-            ))}
-          </div>
-
-          {mode === 'member' ? (
-            <div className="py-1">
-              {project.team.length === 0 ? (
-                <p className="px-3 py-2" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>Sem membros na equipe.</p>
-              ) : (
-                project.team.map((member) => (
-                  <button
-                    key={member.id}
-                    onClick={() => selectMember(member)}
-                    className="w-full flex items-center gap-2 px-3 py-1.5"
-                    style={{ fontSize: 12, color: entry.responsibleMemberId === member.id ? 'var(--oe-primary)' : 'var(--text-secondary)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--surface-subtle)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = '')}
-                  >
-                    <span
-                      className="flex items-center justify-center shrink-0"
-                      style={{ width: 20, height: 20, borderRadius: '50%', background: 'var(--oe-primary)', color: 'white', fontSize: 9, fontWeight: 600 }}
-                    >
-                      {memberInitials(member.name)}
-                    </span>
-                    <span className="flex-1 truncate text-left">{member.name}</span>
-                    {entry.responsibleMemberId === member.id && <span style={{ fontSize: 10, color: 'var(--oe-primary)' }}>✓</span>}
-                  </button>
-                ))
-              )}
-            </div>
-          ) : (
-            <div className="px-2 pt-2 pb-1 space-y-1.5">
-              <input
-                autoFocus
-                value={freeText}
-                onChange={(e) => setFreeText(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') saveFreeText(); if (e.key === 'Escape') setOpen(false) }}
-                placeholder="Nome..."
-                className="w-full focus:outline-none"
-                style={{ fontSize: 12, border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)', padding: '4px 8px', color: 'var(--text-primary)' }}
-                onFocus={e => (e.currentTarget.style.borderColor = 'var(--oe-primary)')}
-                onBlur={e => (e.currentTarget.style.borderColor = 'var(--border-default)')}
-              />
-              <button
-                onClick={saveFreeText}
-                className="w-full transition-colors"
-                style={{ fontSize: 11, background: 'var(--oe-primary)', color: 'white', borderRadius: 'var(--radius-md)', padding: '4px 8px' }}
-                onMouseEnter={e => (e.currentTarget.style.background = 'var(--oe-primary-hover)')}
-                onMouseLeave={e => (e.currentTarget.style.background = 'var(--oe-primary)')}
-              >
-                OK
-              </button>
-            </div>
-          )}
-        </div>,
-        document.body,
+          {memberInitials(owner.name)}
+        </span>
+      ))}
+      {overflow > 0 && (
+        <span style={{ fontSize: 10, color: 'var(--text-tertiary)', marginLeft: 2 }}>+{overflow}</span>
       )}
-    </>
+      {owners.length === 1 && (
+        <span className="truncate" style={{ fontSize: 11, color: 'var(--text-secondary)', marginLeft: 4 }}>
+          {owners[0].name}
+        </span>
+      )}
+    </div>
   )
 }
 
@@ -955,7 +828,7 @@ function PhaseHeader({ phase, colSpan, collapsed, onToggle, onAdd, onDelete, onR
 export default function PlanPage({ projectId, onNavigateToRisk }: { projectId: string; onNavigateToRisk?: (riskId: string) => void }) {
   const {
     projects, settings,
-    updateEntry, deleteEntry, updateEntryStatus, resetStatusOverride, updateEntryRisk,
+    updateEntry, deleteEntry, moveEntryToPhase, updateEntryStatus, resetStatusOverride, updateEntryRisk,
     updatePhase, deletePhase, setBaseline, clearBaseline, changeEntryDate, addDelayLogEntry,
     addPhase, setColumnVisibility,
   } = useAppStore()
@@ -964,7 +837,9 @@ export default function PlanPage({ projectId, onNavigateToRisk }: { projectId: s
   const project = projects.find((p) => p.id === projectId)!
 
   const [collapsedPhases, setCollapsedPhases] = useState<Set<string>>(new Set())
+  const [expandedRows, setExpandedRows] = useState<ExpandedState>(true)
   const [addModal, setAddModal] = useState<{ type: EntryType; phaseId?: string; parentId?: string; parentEntryId?: string } | null>(null)
+  const [editEntry, setEditEntry] = useState<{ entry: Entry; phaseId: string } | null>(null)
   const [commentsEntry, setCommentsEntry] = useState<Entry | null>(null)
   const [pendingDate, setPendingDate] = useState<PendingDate | null>(null)
   const [addingPhase, setAddingPhase] = useState(false)
@@ -1040,7 +915,7 @@ export default function PlanPage({ projectId, onNavigateToRisk }: { projectId: s
 
     return project.phases.flatMap((ph) =>
       ph.entries
-        .filter((e) => !e.parentEntryId)
+        .filter((e) => !e.parentEntryId && !e.hiddenFromPlan)
         .map((e) => {
           const childMtgs = childMeetingsByParent.get(e.id) ?? []
           const subRows: PlanRow[] | undefined =
@@ -1135,10 +1010,10 @@ export default function PlanPage({ projectId, onNavigateToRisk }: { projectId: s
             depth={row.depth}
             projectId={projectId}
             linkedRisk={linkedRisk}
-            onSave={(v) => updateEntry(projectId, e.id, { name: v })}
             onOpenComments={() => setCommentsEntry(e)}
             onNavigateToRisk={onNavigateToRisk}
             onChangeRisk={(f) => updateEntryRisk(projectId, e.id, f)}
+            onOpenEdit={() => setEditEntry({ entry: e, phaseId: e._phaseId })}
           />
         )
       },
@@ -1147,9 +1022,7 @@ export default function PlanPage({ projectId, onNavigateToRisk }: { projectId: s
     {
       id: 'responsible', size: 120,
       header: () => <span>{t('entry.responsible')}</span>,
-      cell: ({ row }) => (
-        <ResponsibleCell entry={row.original} project={project} projectId={projectId} />
-      ),
+      cell: ({ row }) => <ResponsibleCell entry={row.original} />,
     },
     // Dependencies
     {
@@ -1313,7 +1186,7 @@ export default function PlanPage({ projectId, onNavigateToRisk }: { projectId: s
       },
     },
   ], [project, settings.holidays, entryPhaseMap, projectId,
-    updateEntry, updateEntryStatus, updateEntryRisk, deleteEntry])
+    updateEntryStatus, updateEntryRisk, deleteEntry])
 
   const table = useReactTable<PlanRow>({
     data,
@@ -1321,9 +1194,9 @@ export default function PlanPage({ projectId, onNavigateToRisk }: { projectId: s
     getSubRows: (row) => row.subRows,
     getCoreRowModel: getCoreRowModel(),
     getExpandedRowModel: getExpandedRowModel(),
-    state: { columnVisibility, expanded: true as any },
+    state: { columnVisibility, expanded: expandedRows },
     onColumnVisibilityChange: handleColVisChange as any,
-    initialState: { expanded: true },
+    onExpandedChange: setExpandedRows,
   })
 
   // Phase map for header rendering
@@ -1547,6 +1420,23 @@ export default function PlanPage({ projectId, onNavigateToRisk }: { projectId: s
           parentEntryId={addModal.parentEntryId}
           entryNameMap={entryNameMap}
           onClose={() => setAddModal(null)}
+        />
+      )}
+
+      {/* Edit entry modal */}
+      {editEntry && (
+        <EntryModal
+          open
+          mode="edit"
+          projectId={projectId}
+          phases={project.phases}
+          teamMembers={project.team}
+          entry={editEntry.entry}
+          entryPhaseId={editEntry.phaseId}
+          onClose={() => setEditEntry(null)}
+          onRequestDateChange={(originalEntry, field, value) =>
+            requestDateChange(originalEntry, field, value)
+          }
         />
       )}
     </div>

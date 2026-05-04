@@ -24,6 +24,14 @@ export interface Link {
   url: string
 }
 
+export interface EntryOwner {
+  id: string
+  type: 'member' | 'text'
+  memberId?: string
+  name: string
+  role?: string
+}
+
 export interface Entry {
   id: string
   type: EntryType
@@ -46,6 +54,8 @@ export interface Entry {
   statusOverride?: boolean
   responsibleMemberId?: string
   responsibleMode?: 'member' | 'free'
+  owners?: EntryOwner[]
+  hiddenFromPlan?: boolean
   subtasks: Entry[]
   comments: EntryComment[]
   links: Link[]

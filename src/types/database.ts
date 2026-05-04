@@ -197,6 +197,25 @@ export interface DbRisk {
   updated_at: string | null
 }
 
+export interface DbOpenPoint {
+  id: string
+  project_id: string | null
+  title: string
+  description: string | null
+  status: string | null
+  priority: string | null
+  owner: string | null
+  due_date: string | null
+  linked_entry_id: string | null
+  resolution: string | null
+  resolved_at: string | null
+  resolved_by: string | null
+  created_at: string | null
+  created_by: string | null
+  created_by_name: string | null
+  created_by_avatar: string | null
+}
+
 // ─── Fetch / write bundles ────────────────────────────────────────────────────
 
 /** All rows needed to reconstruct a full Project from the DB. */
@@ -207,6 +226,7 @@ export interface DbProjectFull {
   comments: DbComment[]
   delay_log: DbDelayLog[]
   risks: DbRisk[]
+  open_points: DbOpenPoint[]
 }
 
 /** All rows that need to be upserted when writing a full Project to the DB. */

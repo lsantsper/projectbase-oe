@@ -7,13 +7,13 @@ import type {
   Project, Phase, Entry, EntryComment, EntryOwner, Link, Risk, ActionTask,
   DelayLogEntry, TeamMember, ProjectCharter, EntryType, EntryStatus,
   RiskFlag, ProjectStatus, ProjectType, AppLanguage,
-  DelayResponsibility, DelayType,
+  DelayResponsibility, DelayType, OpenPoint, OpenPointStatus, OpenPointPriority,
 } from '@/types'
 
 import type {
   DbProject, DbPhase, DbEntry, DbComment, DbDelayLog, DbRisk,
   DbCharter, DbLink, DbTeamMember, DbActionTask, DbSubtaskJson,
-  DbCommentJson, DbProjectFull, DbProjectFlat,
+  DbCommentJson, DbProjectFull, DbProjectFlat, DbOpenPoint,
 } from '@/types/database'
 
 // ─── DB → Store ───────────────────────────────────────────────────────────────
@@ -177,6 +177,26 @@ function dbRiskToStore(row: DbRisk): Risk {
   }
 }
 
+function dbOpenPointToStore(row: DbOpenPoint): OpenPoint {
+  return {
+    id: row.id,
+    title: row.title,
+    description: row.description ?? undefined,
+    status: (row.status as OpenPointStatus) ?? 'open',
+    priority: (row.priority as OpenPointPriority) ?? 'medium',
+    responsible: row.owner ?? undefined,
+    dueDate: row.due_date ?? undefined,
+    linkedEntryId: row.linked_entry_id ?? undefined,
+    resolution: row.resolution ?? undefined,
+    resolvedAt: row.resolved_at ?? undefined,
+    resolvedBy: row.resolved_by ?? undefined,
+    createdAt: row.created_at ?? new Date().toISOString(),
+    createdBy: row.created_by ?? undefined,
+    comments: [],
+    attachments: [],
+  }
+}
+
 function dbDelayLogToStore(row: DbDelayLog): DelayLogEntry {
   return {
     id: row.id,
@@ -194,7 +214,7 @@ function dbDelayLogToStore(row: DbDelayLog): DelayLogEntry {
 
 /** Reconstruct a full Project from all fetched DB rows. */
 export function dbProjectToStore(data: DbProjectFull): Project {
-  const { project, phases, entries, comments, delay_log, risks } = data
+  const { project, phases, entries, comments, delay_log, risks, open_points } = data
 
   const sortedPhases = [...phases].sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
 
@@ -217,6 +237,7 @@ export function dbProjectToStore(data: DbProjectFull): Project {
     phases: sortedPhases.map(ph => dbPhaseToStore(ph, entries, comments)),
     risks: risks.map(dbRiskToStore),
     delayLog: delay_log.map(dbDelayLogToStore),
+    openPoints: open_points.map(dbOpenPointToStore),
     archived: project.archived ?? false,
   }
 }

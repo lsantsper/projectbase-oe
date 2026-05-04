@@ -379,12 +379,13 @@ export const useAppStore = create<AppStore>()(
 
           const ids = projectRows.map((p) => p.id)
 
-          const [phasesRes, entriesRes, commentsRes, risksRes, delayRes] = await Promise.all([
+          const [phasesRes, entriesRes, commentsRes, risksRes, delayRes, openPointsRes] = await Promise.all([
             supabase.from('phases').select('*').in('project_id', ids),
             supabase.from('entries').select('*').in('project_id', ids),
             supabase.from('comments').select('*').in('project_id', ids),
             supabase.from('risks').select('*').in('project_id', ids),
             supabase.from('delay_log').select('*').in('project_id', ids),
+            supabase.from('open_points').select('*').in('project_id', ids).order('created_at', { ascending: false }),
           ])
 
           const phases = phasesRes.data ?? []
@@ -392,6 +393,7 @@ export const useAppStore = create<AppStore>()(
           const comments = commentsRes.data ?? []
           const risks = risksRes.data ?? []
           const delay_log = delayRes.data ?? []
+          const open_points = openPointsRes.data ?? []
 
           const projects = projectRows.map((project) =>
             dbProjectToStore({
@@ -401,6 +403,7 @@ export const useAppStore = create<AppStore>()(
               comments: comments.filter((c) => c.project_id === project.id),
               delay_log: delay_log.filter((d) => d.project_id === project.id),
               risks: risks.filter((r) => r.project_id === project.id),
+              open_points: open_points.filter((op) => op.project_id === project.id),
             } as DbProjectFull)
           )
 
@@ -474,12 +477,13 @@ export const useAppStore = create<AppStore>()(
             return
           }
           const ids = projectRows.map((p) => p.id)
-          const [phasesRes, entriesRes, commentsRes, risksRes, delayRes] = await Promise.all([
+          const [phasesRes, entriesRes, commentsRes, risksRes, delayRes, openPointsRes] = await Promise.all([
             supabase.from('phases').select('*').in('project_id', ids),
             supabase.from('entries').select('*').in('project_id', ids),
             supabase.from('comments').select('*').in('project_id', ids),
             supabase.from('risks').select('*').in('project_id', ids),
             supabase.from('delay_log').select('*').in('project_id', ids),
+            supabase.from('open_points').select('*').in('project_id', ids).order('created_at', { ascending: false }),
           ])
           const archivedProjects = projectRows.map((project) =>
             dbProjectToStore({
@@ -489,6 +493,7 @@ export const useAppStore = create<AppStore>()(
               comments: (commentsRes.data ?? []).filter((c) => c.project_id === project.id),
               delay_log: (delayRes.data ?? []).filter((d) => d.project_id === project.id),
               risks: (risksRes.data ?? []).filter((r) => r.project_id === project.id),
+              open_points: (openPointsRes.data ?? []).filter((op) => op.project_id === project.id),
             } as DbProjectFull)
           )
           set({ archivedProjects, archivedProjectsLoaded: true })
@@ -1725,17 +1730,20 @@ export const useAppStore = create<AppStore>()(
           })),
         }))
         sync(async () => {
+          const authUser = useAuthStore.getState().user
           const { error } = await supabase.from('open_points').insert({
             id,
             project_id: projectId,
             title: newOp.title,
-            description: newOp.description ?? null,
+            description: newOp.description || newOp.title,
             status: newOp.status,
             priority: newOp.priority,
             owner: newOp.responsible ?? null,
             due_date: newOp.dueDate ?? null,
             linked_entry_id: newOp.linkedEntryId ?? null,
-            created_by: newOp.createdBy ?? null,
+            created_by: authUser?.id ?? null,
+            created_by_name: authUser?.user_metadata?.full_name ?? authUser?.email ?? null,
+            created_by_avatar: authUser?.user_metadata?.avatar_url ?? null,
             created_at: now,
           })
           if (error) throw new Error(error.message)

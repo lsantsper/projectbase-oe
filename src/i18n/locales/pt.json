@@ -178,10 +178,20 @@
     "owners": "Responsáveis",
     "addOwner": "Adicionar responsável",
     "fromTeam": "Da equipe",
+    "fromUser": "Usuário",
     "freeText": "Texto livre",
-    "showInPlan": "Mostrar no plano",
+    "showInPlan": "Exibir no Project Plan",
+    "showInPlanToast": "Tarefa agora exibida no Project Plan",
     "hiddenFromPlan": "Oculto do plano",
+    "hiddenFromPlanHint": "Aparece apenas na base de tarefas e no Kanban interno",
+    "hiddenFromPlanToast": "Tarefa ocultada do Project Plan",
+    "hiddenBadge": "Oculto do plano",
+    "internalTasks": "Tarefas internas ({{count}})",
     "subtaskOf": "Subtarefa de",
+    "project": "Projeto",
+    "moveToProject": "Mover para \"{{project}}\"",
+    "moveWarning": "A tarefa será movida para outro projeto. Comentários e dependências serão removidos.",
+    "dependenciesRemoved": "Dependências removidas ao mover entre projetos.",
     "comments": "Comentários",
     "noComments": "Nenhum comentário ainda.",
     "commentPlaceholder": "Adicionar comentário..."
@@ -354,8 +364,12 @@
     "emptyTitle": "Nenhuma tarefa atribuída",
     "emptySubtitle": "Atribua tarefas a membros da equipe no plano do projeto",
     "newTask": "Nova Tarefa",
+    "editTask": "Editar Tarefa",
     "selectProject": "Selecionar projeto",
     "selectPhase": "Selecionar fase"
+  },
+  "kanban": {
+    "internalSection": "Tarefas internas"
   },
   "report": {
     "exportBtn": "Exportar report",

@@ -1732,7 +1732,7 @@ export const useAppStore = create<AppStore>()(
             description: newOp.description ?? null,
             status: newOp.status,
             priority: newOp.priority,
-            responsible: newOp.responsible ?? null,
+            owner: newOp.responsible ?? null,
             due_date: newOp.dueDate ?? null,
             linked_entry_id: newOp.linkedEntryId ?? null,
             created_by: newOp.createdBy ?? null,
@@ -1755,7 +1755,7 @@ export const useAppStore = create<AppStore>()(
           if (patch.description !== undefined) fields.description = patch.description
           if (patch.status !== undefined) fields.status = patch.status
           if (patch.priority !== undefined) fields.priority = patch.priority
-          if (patch.responsible !== undefined) fields.responsible = patch.responsible
+          if (patch.responsible !== undefined) fields.owner = patch.responsible
           if (patch.dueDate !== undefined) fields.due_date = patch.dueDate
           if (patch.linkedEntryId !== undefined) fields.linked_entry_id = patch.linkedEntryId
           if (Object.keys(fields).length === 0) return

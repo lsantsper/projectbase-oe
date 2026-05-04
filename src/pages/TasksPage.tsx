@@ -1,5 +1,4 @@
 import { useState, useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import {
   DndContext, DragEndEvent, DragStartEvent, DragOverlay,
@@ -8,10 +7,8 @@ import {
 } from '@dnd-kit/core'
 import { CSS } from '@dnd-kit/utilities'
 import { useAppStore } from '@/store/useAppStore'
-import { Entry, EntryOwner, EntryStatus, EntryType, Phase, Project } from '@/types'
-import { Modal } from '@/components/ui/Modal'
-import { Button } from '@/components/ui/Button'
-import { Input, Select, Field } from '@/components/ui/Input'
+import { Entry, EntryOwner, EntryStatus, Project } from '@/types'
+import EntryModal from '@/components/plan/EntryModal'
 
 // ─── constants ────────────────────────────────────────────────────────────────
 
@@ -37,12 +34,13 @@ type GlobalCard = Entry & {
   _projectId: string
   _projectName: string
   _projectColor: string
+  _phaseId: string
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 function projectColor(project: Project, index: number): string {
-  return project.color ?? PALETTE[index % PALETTE.length]
+  return (project as any).color ?? PALETTE[index % PALETTE.length]
 }
 
 function fmtDate(iso: string): string {
@@ -71,15 +69,15 @@ function buildCards(projects: Project[]): GlobalCard[] {
     const color = projectColor(proj, i)
     for (const ph of proj.phases) {
       for (const entry of ph.entries) {
-        if (entry.hiddenFromPlan) continue
+        // show in /tasks if it has owners (regardless of hiddenFromPlan)
         const owners = entryOwners(entry)
         if ((entry.type === 'task' || entry.type === 'meeting') && owners.length > 0) {
-          cards.push({ ...entry, _projectId: proj.id, _projectName: proj.name, _projectColor: color })
+          cards.push({ ...entry, _projectId: proj.id, _projectName: proj.name, _projectColor: color, _phaseId: ph.id })
         }
         for (const sub of entry.subtasks) {
           const subOwners = entryOwners(sub)
           if ((sub.type === 'task' || sub.type === 'meeting') && subOwners.length > 0) {
-            cards.push({ ...sub, _projectId: proj.id, _projectName: proj.name, _projectColor: color })
+            cards.push({ ...sub, _projectId: proj.id, _projectName: proj.name, _projectColor: color, _phaseId: ph.id })
           }
         }
       }
@@ -96,30 +94,28 @@ function OwnerAvatars({ entry }: { entry: Entry }) {
   const MAX = 3
   const visible = owners.slice(0, MAX)
   const overflow = owners.length - MAX
-  const tooltip = owners.map((o) => o.name).join(', ')
+  const tooltip = owners.map(o => o.name).join(', ')
 
   return (
-    <div className="flex items-center" title={tooltip}>
+    <div style={{ display: 'flex', alignItems: 'center' }} title={tooltip}>
       {visible.map((owner, i) => (
         <span
           key={owner.id}
-          className="flex items-center justify-center"
           style={{
             width: 22, height: 22, borderRadius: '50%',
             background: 'var(--oe-primary)', color: 'white',
-            fontSize: 9, fontWeight: 600,
+            fontSize: 9, fontWeight: 600, display: 'flex',
+            alignItems: 'center', justifyContent: 'center',
             marginLeft: i > 0 ? -7 : 0,
             border: '1.5px solid var(--surface-card)',
-            zIndex: MAX - i,
-            position: 'relative',
-            flexShrink: 0,
+            zIndex: MAX - i, position: 'relative', flexShrink: 0,
           }}
         >
           {initials(owner.name)}
         </span>
       ))}
       {overflow > 0 && (
-        <span className="ml-1" style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>+{overflow}</span>
+        <span style={{ marginLeft: 4, fontSize: 10, color: 'var(--text-tertiary)' }}>+{overflow}</span>
       )}
     </div>
   )
@@ -132,6 +128,7 @@ function TaskCard({ card, onClick, ghost = false }: {
   onClick?: () => void
   ghost?: boolean
 }) {
+  const { t } = useTranslation()
   const today = new Date().toISOString().split('T')[0]
   const endDate = card.type === 'task' ? card.plannedEnd : card.plannedDate
   const isOverdue = endDate && endDate < today && card.status !== 'done'
@@ -141,20 +138,22 @@ function TaskCard({ card, onClick, ghost = false }: {
   return (
     <div
       onClick={onClick}
-      className="rounded-[var(--radius-md)] p-3 select-none"
       style={{
         background: 'var(--surface-card)',
         border: '0.5px solid var(--border-default)',
         borderLeft: `3px solid ${card._projectColor}`,
+        borderRadius: 'var(--radius-md)',
+        padding: 12,
         boxShadow: ghost ? '0 4px 16px rgba(0,0,0,0.14)' : '0 1px 3px rgba(0,0,0,0.04)',
         cursor: ghost ? 'grabbing' : 'pointer',
         opacity: ghost ? 0.95 : 1,
+        userSelect: 'none',
       }}
     >
-      {/* Project badge + risk */}
-      <div className="flex items-center gap-1.5 mb-1.5">
+      {/* Project badge + indicators */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
         <span style={{ width: 6, height: 6, borderRadius: '50%', background: card._projectColor, flexShrink: 0 }} />
-        <span className="truncate flex-1" style={{ fontSize: 10, color: 'var(--text-tertiary)', fontWeight: 500 }}>
+        <span style={{ flex: 1, fontSize: 10, color: 'var(--text-tertiary)', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {card._projectName}
         </span>
         {hasComments && (
@@ -176,11 +175,18 @@ function TaskCard({ card, onClick, ghost = false }: {
         {card.name}
       </p>
 
-      {/* Footer: owner avatars + date */}
-      <div className="flex items-center justify-between gap-2">
-        <OwnerAvatars entry={card} />
+      {/* Footer: owner avatars + hidden badge + date */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <OwnerAvatars entry={card} />
+          {card.hiddenFromPlan && (
+            <span style={{ fontSize: 9, padding: '1px 5px', borderRadius: 'var(--radius-pill)', background: 'var(--surface-subtle)', color: 'var(--text-disabled)', border: '0.5px solid var(--border-default)', whiteSpace: 'nowrap' }}>
+              {t('entry.hiddenBadge')}
+            </span>
+          )}
+        </div>
         {endDate && (
-          <span style={{ fontSize: 11, color: isOverdue ? 'var(--color-danger-text)' : 'var(--text-tertiary)' }}>
+          <span style={{ fontSize: 11, color: isOverdue ? 'var(--color-danger-text)' : 'var(--text-tertiary)', flexShrink: 0 }}>
             {fmtDate(endDate)}
           </span>
         )}
@@ -191,7 +197,7 @@ function TaskCard({ card, onClick, ghost = false }: {
 
 // ─── DraggableCard ────────────────────────────────────────────────────────────
 
-function DraggableCard({ card, onCardClick }: { card: GlobalCard; onCardClick: (c: GlobalCard) => void }) {
+function DraggableCard({ card, onEdit }: { card: GlobalCard; onEdit: (c: GlobalCard) => void }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: card.id })
   const style = transform ? { transform: CSS.Translate.toString(transform) } : undefined
   return (
@@ -202,18 +208,18 @@ function DraggableCard({ card, onCardClick }: { card: GlobalCard; onCardClick: (
       {...attributes}
       className={`cursor-grab active:cursor-grabbing touch-none ${isDragging ? 'opacity-30' : ''}`}
     >
-      <TaskCard card={card} onClick={isDragging ? undefined : () => onCardClick(card)} />
+      <TaskCard card={card} onClick={isDragging ? undefined : () => onEdit(card)} />
     </div>
   )
 }
 
 // ─── KanbanColumn ─────────────────────────────────────────────────────────────
 
-function KanbanColumn({ status, labelKey, cards, onCardClick }: {
+function KanbanColumn({ status, labelKey, cards, onEdit }: {
   status: EntryStatus
   labelKey: string
   cards: GlobalCard[]
-  onCardClick: (c: GlobalCard) => void
+  onEdit: (c: GlobalCard) => void
 }) {
   const { t } = useTranslation()
   const { setNodeRef, isOver } = useDroppable({ id: status })
@@ -221,27 +227,24 @@ function KanbanColumn({ status, labelKey, cards, onCardClick }: {
 
   return (
     <div
-      className="flex flex-col min-h-[60vh] transition-all"
       style={{
-        background: style.bg,
-        borderRadius: 'var(--radius-lg)',
+        display: 'flex', flexDirection: 'column', minHeight: '60vh',
+        background: style.bg, borderRadius: 'var(--radius-lg)',
         outline: isOver ? `2px solid ${style.header}` : '2px solid transparent',
+        transition: 'outline 0.1s',
       }}
     >
-      <div className="flex items-center justify-between px-3 pt-3 pb-2">
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 12px 8px' }}>
         <span style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', color: style.header }}>
           {t(labelKey as any)}
         </span>
-        <span
-          className="flex items-center justify-center"
-          style={{ minWidth: 20, height: 20, borderRadius: 'var(--radius-pill)', background: 'var(--surface-card)', color: 'var(--text-tertiary)', fontSize: 11, fontWeight: 500, padding: '0 6px' }}
-        >
+        <span style={{ minWidth: 20, height: 20, borderRadius: 'var(--radius-pill)', background: 'var(--surface-card)', color: 'var(--text-tertiary)', fontSize: 11, fontWeight: 500, padding: '0 6px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           {cards.length}
         </span>
       </div>
-      <div ref={setNodeRef} className="flex-1 px-3 pb-3 space-y-2">
-        {cards.map((card) => (
-          <DraggableCard key={card.id} card={card} onCardClick={onCardClick} />
+      <div ref={setNodeRef} style={{ flex: 1, padding: '0 12px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {cards.map(card => (
+          <DraggableCard key={card.id} card={card} onEdit={onEdit} />
         ))}
       </div>
     </div>
@@ -253,8 +256,8 @@ function KanbanColumn({ status, labelKey, cards, onCardClick }: {
 function EmptyState({ onNew }: { onNew: () => void }) {
   const { t } = useTranslation()
   return (
-    <div className="flex flex-col items-center justify-center flex-1 py-24">
-      <svg className="w-12 h-12 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.25} style={{ color: 'var(--border-strong)' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, padding: '80px 0' }}>
+      <svg width={48} height={48} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.25} style={{ color: 'var(--border-strong)', marginBottom: 16 }}>
         <rect x="3" y="3" width="18" height="18" rx="2" />
         <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4" />
       </svg>
@@ -266,8 +269,7 @@ function EmptyState({ onNew }: { onNew: () => void }) {
       </p>
       <button
         onClick={onNew}
-        className="mt-6 px-4 py-2 rounded-lg text-sm font-medium transition-opacity"
-        style={{ background: 'var(--oe-primary)', color: 'white' }}
+        style={{ marginTop: 24, padding: '8px 16px', borderRadius: 'var(--radius-lg)', fontSize: 13, fontWeight: 500, background: 'var(--oe-primary)', color: 'white', border: 'none', cursor: 'pointer' }}
         onMouseEnter={e => (e.currentTarget.style.opacity = '0.85')}
         onMouseLeave={e => (e.currentTarget.style.opacity = '1')}
       >
@@ -288,206 +290,10 @@ function FilterSelect({ value, onChange, children }: {
     <select
       value={value}
       onChange={e => onChange(e.target.value)}
-      className="focus:outline-none transition-colors"
-      style={{ fontSize: 12, border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)', padding: '4px 8px', background: 'var(--surface-card)', color: 'var(--text-secondary)' }}
+      style={{ fontSize: 12, border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)', padding: '4px 8px', background: 'var(--surface-card)', color: 'var(--text-secondary)', outline: 'none' }}
     >
       {children}
     </select>
-  )
-}
-
-// ─── NewTaskModal ─────────────────────────────────────────────────────────────
-
-type NewTaskForm = {
-  name: string
-  projectId: string
-  phaseId: string
-  parentTaskId: string
-  plannedStart: string
-  plannedEnd: string
-  showInPlan: boolean
-}
-
-function NewTaskModal({ open, projects, onClose }: {
-  open: boolean
-  projects: Project[]
-  onClose: () => void
-}) {
-  const { t } = useTranslation()
-  const { addEntry, addSubtask } = useAppStore()
-
-  const activeProjects = useMemo(() => projects.filter((p) => !p.archived), [projects])
-
-  const [form, setForm] = useState<NewTaskForm>({
-    name: '',
-    projectId: activeProjects[0]?.id ?? '',
-    phaseId: '',
-    parentTaskId: '',
-    plannedStart: '',
-    plannedEnd: '',
-    showInPlan: true,
-  })
-  const [endError, setEndError] = useState('')
-
-  function set<K extends keyof NewTaskForm>(k: K, v: NewTaskForm[K]) {
-    setForm((f) => {
-      const next = { ...f, [k]: v }
-      if (k === 'projectId') {
-        const proj = projects.find((p) => p.id === v)
-        next.phaseId = proj?.phases[0]?.id ?? ''
-        next.parentTaskId = ''
-      }
-      if (k === 'phaseId') next.parentTaskId = ''
-      return next
-    })
-  }
-
-  const selectedProject = useMemo(
-    () => projects.find((p) => p.id === form.projectId),
-    [projects, form.projectId],
-  )
-
-  const selectedPhase = useMemo(
-    () => selectedProject?.phases.find((ph) => ph.id === form.phaseId),
-    [selectedProject, form.phaseId],
-  )
-
-  const parentTasks = useMemo(
-    () => (selectedPhase?.entries ?? []).filter((e) => e.type === 'task'),
-    [selectedPhase],
-  )
-
-  // Reset when modal opens
-  useState(() => {
-    if (!open) return
-    const proj = activeProjects[0]
-    setForm({
-      name: '',
-      projectId: proj?.id ?? '',
-      phaseId: proj?.phases[0]?.id ?? '',
-      parentTaskId: '',
-      plannedStart: '',
-      plannedEnd: '',
-      showInPlan: true,
-    })
-    setEndError('')
-  })
-
-  function handleSave() {
-    if (!form.name.trim() || !form.projectId || !form.phaseId) return
-    if (form.plannedStart && form.plannedEnd && form.plannedEnd < form.plannedStart) {
-      setEndError(t('errors.endBeforeStart'))
-      return
-    }
-    setEndError('')
-
-    const base: Omit<Entry, 'id' | 'isCritical' | 'comments' | 'links' | 'subtasks'> = {
-      name: form.name.trim(),
-      type: 'task',
-      responsible: '',
-      owners: [],
-      dependsOn: [],
-      riskFlag: 'none',
-      status: 'pending',
-      order: 0,
-      plannedStart: form.plannedStart || undefined,
-      plannedEnd: form.plannedEnd || undefined,
-      hiddenFromPlan: !form.showInPlan || undefined,
-    }
-
-    if (form.parentTaskId) {
-      addSubtask(form.projectId, form.phaseId, form.parentTaskId, base)
-    } else {
-      addEntry(form.projectId, form.phaseId, base)
-    }
-    onClose()
-  }
-
-  return (
-    <Modal
-      open={open}
-      title={t('tasks.newTask')}
-      onClose={onClose}
-      size="md"
-      footer={
-        <>
-          <Button variant="secondary" onClick={onClose}>{t('actions.cancel')}</Button>
-          <Button onClick={handleSave} disabled={!form.name.trim() || !form.phaseId}>
-            {t('actions.confirm')}
-          </Button>
-        </>
-      }
-    >
-      <div className="space-y-4">
-        <Field label={t('entry.name')} required>
-          <Input
-            autoFocus
-            value={form.name}
-            onChange={(e) => set('name', e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && handleSave()}
-          />
-        </Field>
-
-        <Field label={t('tasks.selectProject')} required>
-          <Select value={form.projectId} onChange={(e) => set('projectId', e.target.value)}>
-            {activeProjects.map((p) => (
-              <option key={p.id} value={p.id}>{p.name}</option>
-            ))}
-          </Select>
-        </Field>
-
-        <Field label={t('tasks.selectPhase')} required>
-          <Select
-            value={form.phaseId}
-            onChange={(e) => set('phaseId', e.target.value)}
-            disabled={!selectedProject}
-          >
-            <option value="">—</option>
-            {(selectedProject?.phases ?? []).map((ph: Phase) => (
-              <option key={ph.id} value={ph.id}>{ph.name}</option>
-            ))}
-          </Select>
-        </Field>
-
-        {parentTasks.length > 0 && (
-          <Field label={t('entry.subtaskOf')}>
-            <Select value={form.parentTaskId} onChange={(e) => set('parentTaskId', e.target.value)}>
-              <option value="">— {t('plan.linkedTaskNone')} —</option>
-              {parentTasks.map((task) => (
-                <option key={task.id} value={task.id}>{task.name}</option>
-              ))}
-            </Select>
-          </Field>
-        )}
-
-        <div className="grid grid-cols-2 gap-4">
-          <Field label={t('entry.plannedStart')}>
-            <Input type="date" value={form.plannedStart} onChange={(e) => set('plannedStart', e.target.value)} />
-          </Field>
-          <Field label={t('entry.plannedEnd')}>
-            <Input
-              type="date"
-              value={form.plannedEnd}
-              onChange={(e) => { set('plannedEnd', e.target.value); setEndError('') }}
-              className={endError ? 'border-red-500' : ''}
-            />
-            {endError && <p className="text-xs text-red-500 mt-1">{endError}</p>}
-          </Field>
-        </div>
-
-        <label className="flex items-center gap-2 cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={form.showInPlan}
-            onChange={(e) => set('showInPlan', e.target.checked)}
-            className="rounded"
-          />
-          <span className="text-sm" style={{ color: 'var(--text-secondary)' }}>
-            {t('entry.showInPlan')}
-          </span>
-        </label>
-      </div>
-    </Modal>
   )
 }
 
@@ -495,7 +301,6 @@ function NewTaskModal({ open, projects, onClose }: {
 
 export default function TasksPage() {
   const { t } = useTranslation()
-  const navigate = useNavigate()
   const { projects, updateEntryStatus } = useAppStore()
 
   const [filterProject, setFilterProject] = useState('')
@@ -503,6 +308,7 @@ export default function TasksPage() {
   const [filterStatus, setFilterStatus] = useState('')
   const [activeId, setActiveId] = useState<string | null>(null)
   const [newTaskOpen, setNewTaskOpen] = useState(false)
+  const [editCard, setEditCard] = useState<GlobalCard | null>(null)
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -519,19 +325,19 @@ export default function TasksPage() {
   }, [projects])
 
   const filteredCards = useMemo(() => {
-    return allCards.filter((c) => {
+    return allCards.filter(c => {
       if (filterProject && c._projectId !== filterProject) return false
       if (filterMember) {
         const owners = entryOwners(c)
-        if (!owners.some((o) => o.name === filterMember)) return false
+        if (!owners.some(o => o.name === filterMember)) return false
       }
       if (filterStatus && c.status !== filterStatus) return false
       return true
     })
   }, [allCards, filterProject, filterMember, filterStatus])
 
-  const activeCard = activeId ? allCards.find((c) => c.id === activeId) : null
-  const validStatuses = new Set(KANBAN_COLS.map((c) => c.status))
+  const activeCard = activeId ? allCards.find(c => c.id === activeId) : null
+  const validStatuses = new Set(KANBAN_COLS.map(c => c.status))
 
   function handleDragStart(e: DragStartEvent) {
     setActiveId(String(e.active.id))
@@ -543,46 +349,56 @@ export default function TasksPage() {
     if (!over) return
     const newStatus = String(over.id) as EntryStatus
     if (!validStatuses.has(newStatus)) return
-    const card = allCards.find((c) => c.id === active.id)
+    const card = allCards.find(c => c.id === active.id)
     if (card && card.status !== newStatus) {
       updateEntryStatus(card._projectId, String(active.id), newStatus)
     }
   }
 
-  function handleCardClick(card: GlobalCard) {
-    navigate(`/projects/${card._projectId}?tab=plan`)
-  }
-
   return (
-    <div className="flex flex-col min-h-full" style={{ background: 'var(--surface-page)' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100%', background: 'var(--surface-page)' }}>
       {/* Topbar */}
       <div
-        className="flex items-center gap-3 px-5 shrink-0"
-        style={{ height: 52, background: 'var(--surface-card)', borderBottom: '0.5px solid var(--border-default)' }}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 12, padding: '0 20px',
+          height: 52, background: 'var(--surface-card)', borderBottom: '0.5px solid var(--border-default)',
+          flexShrink: 0,
+        }}
       >
         <span style={{ fontSize: 15, fontWeight: 500, color: 'var(--text-primary)' }}>
           {t('tasks.title')}
         </span>
 
-        <Button size="sm" onClick={() => setNewTaskOpen(true)}>
-          {t('tasks.newTask')}
-        </Button>
+        <button
+          onClick={() => setNewTaskOpen(true)}
+          style={{
+            fontSize: 13, fontWeight: 500, padding: '5px 12px',
+            background: 'var(--oe-primary)', color: 'white',
+            border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.opacity = '0.85')}
+          onMouseLeave={e => (e.currentTarget.style.opacity = '1')}
+        >
+          + {t('tasks.newTask')}
+        </button>
 
-        <div className="flex-1" />
+        <div style={{ flex: 1 }} />
 
         <FilterSelect value={filterProject} onChange={setFilterProject}>
           <option value="">{t('tasks.filterProject')}</option>
-          {projects.filter((p) => !p.archived).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          {projects.filter(p => !p.archived).map(p => (
+            <option key={p.id} value={p.id}>{p.name}</option>
+          ))}
         </FilterSelect>
 
         <FilterSelect value={filterMember} onChange={setFilterMember}>
           <option value="">{t('tasks.filterMember')}</option>
-          {allMembers.map((m) => <option key={m} value={m}>{m}</option>)}
+          {allMembers.map(m => <option key={m} value={m}>{m}</option>)}
         </FilterSelect>
 
         <FilterSelect value={filterStatus} onChange={setFilterStatus}>
           <option value="">{t('tasks.filterStatus')}</option>
-          {KANBAN_COLS.map((col) => (
+          {KANBAN_COLS.map(col => (
             <option key={col.status} value={col.status}>{t(col.labelKey as any)}</option>
           ))}
         </FilterSelect>
@@ -592,21 +408,21 @@ export default function TasksPage() {
       {allCards.length === 0 ? (
         <EmptyState onNew={() => setNewTaskOpen(true)} />
       ) : (
-        <div className="flex-1 overflow-auto p-6">
+        <div style={{ flex: 1, overflow: 'auto', padding: 24 }}>
           <DndContext
             sensors={sensors}
             onDragStart={handleDragStart}
             onDragEnd={handleDragEnd}
             onDragCancel={() => setActiveId(null)}
           >
-            <div className="grid grid-cols-4 gap-4">
-              {KANBAN_COLS.map((col) => (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+              {KANBAN_COLS.map(col => (
                 <KanbanColumn
                   key={col.status}
                   status={col.status}
                   labelKey={col.labelKey}
-                  cards={filteredCards.filter((c) => c.status === col.status)}
-                  onCardClick={handleCardClick}
+                  cards={filteredCards.filter(c => c.status === col.status)}
+                  onEdit={setEditCard}
                 />
               ))}
             </div>
@@ -617,11 +433,24 @@ export default function TasksPage() {
         </div>
       )}
 
-      <NewTaskModal
+      {/* New task modal */}
+      <EntryModal
         open={newTaskOpen}
-        projects={projects}
+        mode="create"
         onClose={() => setNewTaskOpen(false)}
       />
+
+      {/* Edit task modal */}
+      {editCard && (
+        <EntryModal
+          open
+          mode="edit"
+          entry={editCard}
+          entryProjectId={editCard._projectId}
+          entryPhaseId={editCard._phaseId}
+          onClose={() => setEditCard(null)}
+        />
+      )}
     </div>
   )
 }

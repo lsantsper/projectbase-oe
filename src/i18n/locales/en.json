@@ -178,10 +178,20 @@
     "owners": "Owners",
     "addOwner": "Add owner",
     "fromTeam": "From team",
+    "fromUser": "User",
     "freeText": "Free text",
-    "showInPlan": "Show in plan",
+    "showInPlan": "Show in Project Plan",
+    "showInPlanToast": "Task is now visible in Project Plan",
     "hiddenFromPlan": "Hidden from plan",
+    "hiddenFromPlanHint": "Only visible in the task list and internal Kanban",
+    "hiddenFromPlanToast": "Task hidden from Project Plan",
+    "hiddenBadge": "Hidden from plan",
+    "internalTasks": "Internal tasks ({{count}})",
     "subtaskOf": "Subtask of",
+    "project": "Project",
+    "moveToProject": "Move to \"{{project}}\"",
+    "moveWarning": "The task will be moved to another project. Comments and dependencies will be removed.",
+    "dependenciesRemoved": "Dependencies removed when moving between projects.",
     "comments": "Comments",
     "noComments": "No comments yet.",
     "commentPlaceholder": "Add a comment..."
@@ -354,8 +364,12 @@
     "emptyTitle": "No assigned tasks",
     "emptySubtitle": "Assign tasks to team members in the project plan",
     "newTask": "New Task",
+    "editTask": "Edit Task",
     "selectProject": "Select project",
     "selectPhase": "Select phase"
+  },
+  "kanban": {
+    "internalSection": "Internal tasks"
   },
   "report": {
     "exportBtn": "Export report",

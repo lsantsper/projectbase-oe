@@ -15,7 +15,6 @@ import StatusBadge from '@/components/StatusBadge'
 import { Modal } from '@/components/ui/Modal'
 import { Textarea, Field } from '@/components/ui/Input'
 import CommentsPanel from '@/components/plan/CommentsPanel'
-import AddEntryModal from '@/components/plan/AddEntryModal'
 import EntryModal from '@/components/plan/EntryModal'
 import { computeVariance } from '@/utils/dateEngine'
 import { workdaysBetween, parseHolidays } from '@/utils/businessDays'
@@ -1408,17 +1407,17 @@ export default function PlanPage({ projectId, onNavigateToRisk }: { projectId: s
         />
       )}
 
-      {/* Add entry modal */}
+      {/* Create entry modal */}
       {addModal && (
-        <AddEntryModal
+        <EntryModal
           open
-          projectId={projectId}
-          phases={project.phases}
-          defaultType={addModal.type}
+          mode="create"
+          defaultProjectId={projectId}
           defaultPhaseId={addModal.phaseId}
-          parentId={addModal.parentId}
-          parentEntryId={addModal.parentEntryId}
-          entryNameMap={entryNameMap}
+          defaultParentId={addModal.parentId}
+          defaultParentEntryId={addModal.parentEntryId}
+          defaultType={addModal.type}
+          lockProject
           onClose={() => setAddModal(null)}
         />
       )}
@@ -1428,10 +1427,8 @@ export default function PlanPage({ projectId, onNavigateToRisk }: { projectId: s
         <EntryModal
           open
           mode="edit"
-          projectId={projectId}
-          phases={project.phases}
-          teamMembers={project.team}
           entry={editEntry.entry}
+          entryProjectId={projectId}
           entryPhaseId={editEntry.phaseId}
           onClose={() => setEditEntry(null)}
           onRequestDateChange={(originalEntry, field, value) =>

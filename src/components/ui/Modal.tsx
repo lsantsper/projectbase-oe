@@ -7,12 +7,13 @@ interface ModalProps {
   onClose: () => void
   children: ReactNode
   footer?: ReactNode
-  size?: 'sm' | 'md' | 'lg'
+  size?: 'sm' | 'md' | 'lg' | 'xl'
+  noPadding?: boolean
 }
 
-const MAX_WIDTHS = { sm: 400, md: 560, lg: 720 }
+const MAX_WIDTHS = { sm: 400, md: 560, lg: 720, xl: 920 }
 
-export function Modal({ open, title, onClose, children, footer, size = 'md' }: ModalProps) {
+export function Modal({ open, title, onClose, children, footer, size = 'md', noPadding }: ModalProps) {
   useEffect(() => {
     if (!open) return
     const handler = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
@@ -76,7 +77,7 @@ export function Modal({ open, title, onClose, children, footer, size = 'md' }: M
         </div>
 
         {/* Body */}
-        <div style={{ padding: 20, overflowY: 'auto', flex: 1 }}>
+        <div style={{ padding: noPadding ? 0 : 20, overflowY: noPadding ? 'hidden' : 'auto', flex: 1, overflow: noPadding ? 'hidden' : undefined }}>
           {children}
         </div>
 
